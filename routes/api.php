@@ -54,6 +54,9 @@ Route::get('/provinces', [LocationController::class, 'getProvinces']);
 Route::get('/provinces/{provinceId}/cities', [LocationController::class, 'getCitiesByProvince']);
 Route::get('/locations', [LocationController::class, 'getAllLocations']);
 
+// Public file endpoints (no auth, safe for display-only)
+Route::get('/churches/{churchId}/profile-picture', [ChurchController::class, 'getProfilePicture'])->name('churches.profilePicture.public');
+
 //USERS
 Route::middleware(['auth:sanctum'])->get('/user', function (Request $request) {
     $user = $request->user()->load(['profile.systemRole', 'contact']);
@@ -146,7 +149,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/churches/{churchId}/documents', [ChurchController::class, 'reviewDocuments'])->name('churches.reviewDocuments');
     Route::get('/documents/{documentId}', [ChurchController::class, 'downloadDocument'])->name('documents.download');
     Route::get('/churches/{churchId}', [ChurchController::class, 'show'])->name('churches.show');
-    Route::get('/churches/{churchId}/profile-picture', [ChurchController::class, 'getProfilePicture'])->name('churches.profilePicture');
+    // Route moved to public section above to avoid auth headers for image fetch
     Route::post('/churches/{churchId}/update', [ChurchController::class, 'update'])->name('churches.update');
     
     // Payment Configuration Routes
