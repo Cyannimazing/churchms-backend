@@ -8,5 +8,5 @@ Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
 
-// Schedule subscription updates to run every minute
-Schedule::command('subscriptions:update')->everyMinute();
+// Schedule subscription updates to run every 10 seconds
+Schedule::command('subscriptions:update')->everyTenSeconds();
