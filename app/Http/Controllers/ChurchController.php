@@ -669,14 +669,15 @@ class ChurchController extends Controller
             $eTag = md5($filePath . time());
 
             // Return the file with proper headers
-            // Note: CORS headers are automatically handled by Laravel's CORS middleware
-            return response($downloadResult['contents'], 200, [
-                'Content-Type' => $mimeType,
-                'Content-Disposition' => 'inline',
-                'Cache-Control' => 'public, max-age=86400', // Cache for 24 hours
-                'Pragma' => 'public',
-                'ETag' => $eTag,
-            ]);
+            $response = response($downloadResult['contents'], 200);
+            $response->header('Content-Type', $mimeType);
+            $response->header('Content-Disposition', 'inline');
+            $response->header('Cache-Control', 'public, max-age=86400');
+            $response->header('Pragma', 'public');
+            $response->header('ETag', $eTag);
+            
+            // Don't set CORS headers here - let middleware handle it
+            return $response;
         } catch (\Exception $e) {
             Log::error('Profile picture error: ' . $e->getMessage());
             return response()->json(['error' => 'Failed to retrieve profile picture'], 500);
