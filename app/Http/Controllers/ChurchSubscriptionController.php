@@ -595,6 +595,18 @@ class ChurchSubscriptionController extends Controller
             $userId = $paymentSession->user_id;
             $plan = $paymentSession->plan;
             
+            // Check if transaction already exists for this payment session to prevent duplicates
+            $existingTransaction = SubscriptionTransaction::where('paymongo_session_id', $paymentSession->paymongo_session_id)->first();
+            
+            if ($existingTransaction) {
+                DB::commit();
+                Log::info('Subscription already activated for this payment session', [
+                    'payment_session_id' => $paymentSession->paymongo_session_id,
+                    'transaction_id' => $existingTransaction->SubTransactionID
+                ]);
+                return $existingTransaction;
+            }
+            
             // Get actual payment method from PayMongo session
             $actualPaymentMethod = $this->getActualPaymentMethod($paymentSession->paymongo_session_id);
             
@@ -608,6 +620,38 @@ class ChurchSubscriptionController extends Controller
             $activeSubscription = ChurchSubscription::where('UserID', $userId)
                 ->where('Status', 'Active')
                 ->first();
+            
+            // Check for existing pending subscription
+            $existingPending = ChurchSubscription::where('UserID', $userId)
+                ->where('Status', 'Pending')
+                ->first();
+            
+            // If there's already a pending subscription, don't create another one
+            if ($existingPending) {
+                DB::commit();
+                Log::warning('Pending subscription already exists, skipping creation', [
+                    'user_id' => $userId,
+                    'existing_subscription_id' => $existingPending->SubscriptionID,
+                    'payment_session_id' => $paymentSession->paymongo_session_id
+                ]);
+                
+                // Still create the transaction record if it doesn't exist
+                $referenceNumber = $paymentSession->metadata['receipt_code'] ?? 'SUB-' . strtoupper(substr(uniqid(), -8));
+                
+                $transaction = SubscriptionTransaction::create([
+                    'user_id' => $userId,
+                    'OldPlanID' => $activeSubscription?->PlanID,
+                    'NewPlanID' => $plan->PlanID,
+                    'PaymentMethod' => $actualPaymentMethod,
+                    'AmountPaid' => $plan->Price,
+                    'TransactionDate' => now(),
+                    'receipt_code' => $referenceNumber,
+                    'paymongo_session_id' => $paymentSession->paymongo_session_id,
+                    'Notes' => 'Duplicate payment attempt - ' . $actualPaymentMethod . ' payment via PayMongo - Reference: ' . $referenceNumber,
+                ]);
+                
+                return $transaction;
+            }
             
             // Determine subscription status and dates
             $hasActiveSubscription = $activeSubscription !== null;
