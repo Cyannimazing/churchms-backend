@@ -54,8 +54,18 @@ Route::get('/provinces', [LocationController::class, 'getProvinces']);
 Route::get('/provinces/{provinceId}/cities', [LocationController::class, 'getCitiesByProvince']);
 Route::get('/locations', [LocationController::class, 'getAllLocations']);
 
-// Public file endpoints (profile pictures only - documents require auth)
+// Public file endpoints
 Route::get('/churches/{churchId}/profile-picture', [ChurchController::class, 'getProfilePicture'])->name('churches.profilePicture.public');
+// Time-limited, signed document download (no auth header required, but signature is required)
+Route::get('/documents/signed/{documentId}', [ChurchController::class, 'downloadDocument'])
+    ->middleware('signed')
+    ->name('documents.download.signed');
+
+// Helpful redirect if someone visits the API login page with GET
+Route::get('/login', function () {
+    $frontend = rtrim(env('FRONTEND_URL', 'http://localhost:3000'), '/');
+    return redirect()->away($frontend . '/login');
+})->name('api.login.redirect');
 
 //USERS
 Route::middleware(['auth:sanctum'])->get('/user', function (Request $request) {

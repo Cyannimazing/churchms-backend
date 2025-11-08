@@ -18,6 +18,7 @@ use App\Services\SupabaseStorageService;
 use App\Models\Notification;
 use App\Models\UserProfile;
 use App\Events\NotificationCreated;
+use Illuminate\Support\Facades\URL;
 
 class ChurchController extends Controller
 {
@@ -424,7 +425,13 @@ class ChurchController extends Controller
             $supabase = new SupabaseStorageService();
             $documentData = $documents->map(function ($document) use ($supabase) {
                 $filePath = $document->DocumentPath ?? '';
-                $fileUrl = $filePath ? $supabase->getPublicUrl($filePath) : null;
+
+                // Generate a temporary signed URL valid for 10 minutes
+                $signedUrl = URL::temporarySignedRoute(
+                    'documents.download.signed',
+                    now()->addMinutes(10),
+                    ['documentId' => $document->DocumentID]
+                );
 
                 return [
                     'DocumentID' => $document->DocumentID,
@@ -432,7 +439,7 @@ class ChurchController extends Controller
                     'DocumentPath' => $document->DocumentPath,
                     'SubmissionDate' => $document->SubmissionDate,
                     'FileExists' => !empty($filePath),
-                    'DocumentUrl' => url('/api/documents/' . $document->DocumentID)
+                    'DocumentUrl' => $signedUrl
                 ];
             })->toArray();
 
@@ -486,28 +493,26 @@ class ChurchController extends Controller
             // Get the specific document by ID using findOrFail to ensure we get the exact document
             $document = ChurchOwnerDocument::findOrFail($documentId);
             
-            // Get the church associated with this document
-            $church = Church::findOrFail($document->ChurchID);
+            // If this request comes from a signed URL, allow without authentication
+            $isSigned = $request->hasValidSignature();
             
-            // Authorization: Only allow access to:
-            // 1. System Admins (system_role_id = 1)
-            // 2. Church Owner (user_id matches church owner)
-            $user = Auth::user();
-            
-            if (!$user) {
-                return response()->json(['error' => 'Unauthorized. Please login.'], 401);
-            }
-            
-            $isSystemAdmin = $user->profile && $user->profile->system_role_id === 1;
-            $isChurchOwner = $church->user_id === $user->id;
-            
-            if (!$isSystemAdmin && !$isChurchOwner) {
-                Log::warning('Unauthorized document access attempt', [
-                    'user_id' => $user->id,
-                    'document_id' => $documentId,
-                    'church_id' => $document->ChurchID
-                ]);
-                return response()->json(['error' => 'Unauthorized. You do not have permission to access this document.'], 403);
+            // Otherwise, require authentication and authorization
+            if (!$isSigned) {
+                $church = Church::findOrFail($document->ChurchID);
+                $user = Auth::user();
+                if (!$user) {
+                    return response()->json(['error' => 'Unauthorized. Please login.'], 401);
+                }
+                $isSystemAdmin = $user->profile && $user->profile->system_role_id === 1;
+                $isChurchOwner = $church->user_id === $user->id;
+                if (!$isSystemAdmin && !$isChurchOwner) {
+                    Log::warning('Unauthorized document access attempt', [
+                        'user_id' => $user->id,
+                        'document_id' => $documentId,
+                        'church_id' => $document->ChurchID
+                    ]);
+                    return response()->json(['error' => 'Unauthorized. You do not have permission to access this document.'], 403);
+                }
             }
             
             // Get the correct file path
