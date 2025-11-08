@@ -15,6 +15,9 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use App\Services\SupabaseStorageService;
+use App\Models\Notification;
+use App\Models\UserProfile;
+use App\Events\NotificationCreated;
 
 class ChurchController extends Controller
 {
@@ -215,6 +218,32 @@ class ChurchController extends Controller
                 // Attach all permissions to the admin role
                 $adminRole->permissions()->attach($allPermissions->pluck('PermissionID'));
 
+                // Notify all system admins about the new church application
+                $systemAdmins = UserProfile::where('system_role_id', 1)->pluck('user_id');
+                
+                $ownerName = trim(($user->profile->first_name ?? '') . ' ' . ($user->profile->last_name ?? '')) ?: $user->email;
+                
+                foreach ($systemAdmins as $adminId) {
+                    $notification = Notification::create([
+                        'user_id' => $adminId,
+                        'type' => 'church_application',
+                        'title' => 'New Church Registration',
+                        'message' => "{$ownerName} has submitted a new church registration for {$church->ChurchName}.",
+                        'data' => [
+                            'church_id' => $church->ChurchID,
+                            'church_name' => $church->ChurchName,
+                            'owner_name' => $ownerName,
+                            'owner_email' => $user->email,
+                            'status' => 'pending',
+                            'link' => "/church-ms-taupe.vercel.app/application",
+                        ],
+                        'is_read' => false,
+                    ]);
+                    
+                    // Broadcast to each admin's private channel
+                    broadcast(new NotificationCreated($adminId, $notification));
+                }
+
                 // Return successful response with comprehensive information
                 return response()->json([
                     'status' => 'success',
@@ -342,7 +371,37 @@ class ChurchController extends Controller
         ]);
 
         $church = Church::findOrFail($churchId);
+        $oldStatus = $church->ChurchStatus;
         $church->update(['ChurchStatus' => $validated['ChurchStatus']]);
+
+        // Notify church owner about status change
+        if ($church->user_id && $oldStatus !== $validated['ChurchStatus']) {
+            $statusMessages = [
+                Church::STATUS_ACTIVE => 'Your church registration has been approved! You can now configure your church settings.',
+                Church::STATUS_REJECTED => 'Your church registration has been rejected. Please review the feedback and resubmit your application.',
+                Church::STATUS_DISABLED => 'Your church has been disabled by the system administrator.',
+            ];
+            
+            $message = $statusMessages[$validated['ChurchStatus']] ?? "Your church status has been updated to {$validated['ChurchStatus']}.";
+            
+            $notification = Notification::create([
+                'user_id' => $church->user_id,
+                'type' => 'church_status_changed',
+                'title' => 'Church Application Status Updated',
+                'message' => $message,
+                'data' => [
+                    'church_id' => $church->ChurchID,
+                    'church_name' => $church->ChurchName,
+                    'old_status' => $oldStatus,
+                    'new_status' => $validated['ChurchStatus'],
+                    'link' => '/church-owner/churches',
+                ],
+                'is_read' => false,
+            ]);
+            
+            // Broadcast to church owner
+            broadcast(new NotificationCreated($church->user_id, $notification));
+        }
 
         return response()->json([
             'message' => 'Church status updated.',
@@ -853,11 +912,40 @@ class ChurchController extends Controller
                 }
                 
                 // If church was rejected and is being updated, set back to pending
+                $isResubmission = false;
                 if ($church->ChurchStatus === Church::STATUS_REJECTED) {
                     $church->ChurchStatus = Church::STATUS_PENDING;
+                    $isResubmission = true;
                 }
                 
                 $church->save();
+                
+                // Notify system admins if this is a resubmission
+                if ($isResubmission) {
+                    $systemAdmins = UserProfile::where('system_role_id', 1)->pluck('user_id');
+                    $ownerName = trim(($church->owner->profile->first_name ?? '') . ' ' . ($church->owner->profile->last_name ?? '')) ?: $church->owner->email;
+                    
+                    foreach ($systemAdmins as $adminId) {
+                        $notification = Notification::create([
+                            'user_id' => $adminId,
+                            'type' => 'church_resubmission',
+                            'title' => 'Church Application Resubmitted',
+                            'message' => "{$ownerName} has resubmitted the church registration for {$church->ChurchName}.",
+                            'data' => [
+                                'church_id' => $church->ChurchID,
+                                'church_name' => $church->ChurchName,
+                                'owner_name' => $ownerName,
+                                'owner_email' => $church->owner->email,
+                                'status' => 'pending',
+                                'link' => '/church-ms-taupe.vercel.app/application',
+                            ],
+                            'is_read' => false,
+                        ]);
+                        
+                        // Broadcast to each admin's private channel
+                        broadcast(new NotificationCreated($adminId, $notification));
+                    }
+                }
 
                 // Update or create profile text fields
                 if (isset($validated['Description']) || isset($validated['ParishDetails']) || isset($validated['Diocese']) || isset($validated['ContactNumber']) || isset($validated['Email'])) {
