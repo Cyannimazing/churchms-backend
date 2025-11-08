@@ -1317,7 +1317,7 @@ class AppointmentController extends Controller
                     'a.cancelled_at',
                     'a.created_at',
                     'u.email as UserEmail',
-                    DB::raw("p.first_name || ' ' || COALESCE(p.middle_name || '. ', '') || p.last_name as UserName"),
+                    DB::raw("COALESCE(p.first_name, '') || ' ' || COALESCE(p.middle_name || '. ', '') || COALESCE(p.last_name, '') as UserName"),
                     's.ServiceID',
                     's.ServiceName',
                     's.Description as ServiceDescription',
@@ -4285,7 +4285,7 @@ class AppointmentController extends Controller
                     'Appointment.AppointmentDate',
                     'st.StartTime',
                     'st.EndTime',
-                    DB::raw("p.first_name || ' ' || COALESCE(p.middle_name || '. ', '') || p.last_name as UserName"),
+                    DB::raw("COALESCE(p.first_name, '') || ' ' || COALESCE(p.middle_name || '. ', '') || COALESCE(p.last_name, '') as UserName"),
                     'users.email as UserEmail'
                 )
                 ->orderBy('st.StartTime')

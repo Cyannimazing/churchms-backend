@@ -60,6 +60,8 @@ Route::get('/documents/{documentId}', [ChurchController::class, 'downloadDocumen
 
 //USERS
 Route::middleware(['auth:sanctum'])->get('/user', function (Request $request) {
+    Artisan::call('subscriptions:update');
+    
     $user = $request->user()->load(['profile.systemRole', 'contact']);
     
     if ($user->profile->system_role_id == 3) {  
