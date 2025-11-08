@@ -2670,7 +2670,21 @@ class AppointmentController extends Controller
                 return null;
             }
 
-            // Check if appointment already exists
+            // Check if an appointment was already created for this payment session
+            $existingTransactionForSession = ChurchTransaction::where('paymongo_session_id', $sessionId)
+                ->whereNotNull('appointment_id')
+                ->first();
+            
+            if ($existingTransactionForSession) {
+                Log::info('Appointment already exists for this payment session', [
+                    'session_id' => $sessionId,
+                    'appointment_id' => $existingTransactionForSession->appointment_id,
+                    'transaction_id' => $existingTransactionForSession->ChurchTransactionID
+                ]);
+                return $existingTransactionForSession;
+            }
+            
+            // Check if appointment already exists (legacy check for backward compatibility)
             $existingAppointment = DB::table('Appointment')
                 ->where('UserID', $userId)
                 ->where('ServiceID', $serviceId)
@@ -2680,6 +2694,10 @@ class AppointmentController extends Controller
                 ->first();
 
             if ($existingAppointment) {
+                Log::warning('Duplicate appointment detected - linking to existing appointment', [
+                    'session_id' => $sessionId,
+                    'appointment_id' => $existingAppointment->AppointmentID
+                ]);
                 // Find existing transaction
                 return ChurchTransaction::where('appointment_id', $existingAppointment->AppointmentID)->first();
             }
@@ -3217,12 +3235,44 @@ class AppointmentController extends Controller
         try {
             DB::beginTransaction();
             
+            // Refresh transaction to get latest state (prevent race conditions)
+            $transaction->refresh();
+            
             // Check if appointment was already created
             if ($transaction->appointment_id) {
                 Log::info('Appointment already exists for this transaction', [
                     'appointment_id' => $transaction->appointment_id,
                     'transaction_id' => $transaction->ChurchTransactionID
                 ]);
+                DB::commit();
+                return $transaction;
+            }
+            
+            // Check if another appointment already exists for the same payment session
+            $existingAppointmentForSession = ChurchTransaction::where('paymongo_session_id', $transaction->paymongo_session_id)
+                ->whereNotNull('appointment_id')
+                ->where('ChurchTransactionID', '!=', $transaction->ChurchTransactionID)
+                ->first();
+            
+            if ($existingAppointmentForSession) {
+                Log::warning('Duplicate appointment creation prevented - another appointment exists for this payment session', [
+                    'current_transaction_id' => $transaction->ChurchTransactionID,
+                    'existing_transaction_id' => $existingAppointmentForSession->ChurchTransactionID,
+                    'existing_appointment_id' => $existingAppointmentForSession->appointment_id,
+                    'paymongo_session_id' => $transaction->paymongo_session_id
+                ]);
+                
+                // Link this transaction to the existing appointment to maintain consistency
+                $transaction->update([
+                    'appointment_id' => $existingAppointmentForSession->appointment_id,
+                    'status' => 'paid',
+                    'notes' => sprintf(
+                        '[Ref: %s] Duplicate payment session - linked to existing appointment #%s',
+                        $transaction->receipt_code ?? 'N/A',
+                        $existingAppointmentForSession->appointment_id
+                    )
+                ]);
+                
                 DB::commit();
                 return $transaction;
             }

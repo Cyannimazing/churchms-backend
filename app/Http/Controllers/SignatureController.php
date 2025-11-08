@@ -3,11 +3,19 @@
 namespace App\Http\Controllers;
 
 use App\Models\Signature;
+use App\Services\SupabaseStorageService;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Log;
 
 class SignatureController extends Controller
 {
+    protected $supabase;
+
+    public function __construct(SupabaseStorageService $supabase)
+    {
+        $this->supabase = $supabase;
+    }
+
     public function index(Request $request)
     {
         $churchId = $request->query('church_id');
@@ -28,14 +36,38 @@ class SignatureController extends Controller
         $request->validate([
             'church_id' => 'required|exists:Church,ChurchID',
             'name' => 'required|string|max:255',
-            'signature' => 'required|image|mimes:jpeg,png,jpg,gif|max:5120', // 5MB max
+            'signature' => 'required|image|mimes:jpeg,png,jpg,gif,svg|max:5120', // 5MB max
         ]);
 
         $imagePath = null;
+        
         if ($request->hasFile('signature')) {
             $file = $request->file('signature');
-            $filename = time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
-            $imagePath = $file->storeAs('signature', $filename, 'local');
+            $filename = 'signatures/' . time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
+            
+            // Upload to Supabase
+            $result = $this->supabase->upload(
+                $filename,
+                file_get_contents($file->getRealPath()),
+                $file->getMimeType()
+            );
+            
+            if ($result['success']) {
+                $imagePath = $result['path'];
+                
+                Log::info('Signature uploaded to Supabase', [
+                    'path' => $imagePath,
+                    'url' => $result['url']
+                ]);
+            } else {
+                Log::error('Failed to upload signature to Supabase', [
+                    'error' => $result['error'] ?? 'Unknown error'
+                ]);
+                return response()->json([
+                    'message' => 'Failed to upload signature image',
+                    'error' => $result['error'] ?? 'Upload failed'
+                ], 500);
+            }
         }
 
         $signature = Signature::create([
@@ -55,9 +87,18 @@ class SignatureController extends Controller
             return response()->json(['message' => 'Signature not found'], 404);
         }
 
-        // Delete the image file from storage
-        if ($signature->imagePath && Storage::disk('local')->exists($signature->imagePath)) {
-            Storage::disk('local')->delete($signature->imagePath);
+        // Delete the image file from Supabase storage
+        if ($signature->imagePath) {
+            $result = $this->supabase->delete($signature->imagePath);
+            
+            if (!$result['success']) {
+                Log::warning('Failed to delete signature from Supabase', [
+                    'signature_id' => $id,
+                    'path' => $signature->imagePath,
+                    'error' => $result['error'] ?? 'Unknown error'
+                ]);
+                // Continue with database deletion even if Supabase deletion fails
+            }
         }
 
         $signature->delete();
@@ -73,13 +114,8 @@ class SignatureController extends Controller
             return response()->json(['message' => 'Signature not found'], 404);
         }
 
-        if (!Storage::disk('local')->exists($signature->imagePath)) {
-            return response()->json(['message' => 'Image file not found'], 404);
-        }
-
-        $file = Storage::disk('local')->get($signature->imagePath);
-        $type = Storage::disk('local')->mimeType($signature->imagePath);
-
-        return response($file, 200)->header('Content-Type', $type);
+        // Redirect to the public Supabase URL
+        $publicUrl = $this->supabase->getPublicUrl($signature->imagePath);
+        return redirect($publicUrl);
     }
 }
