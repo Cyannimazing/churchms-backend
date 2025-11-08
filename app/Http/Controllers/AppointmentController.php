@@ -3319,8 +3319,19 @@ class AppointmentController extends Controller
         try {
             DB::beginTransaction();
             
-            // Refresh transaction to get latest state (prevent race conditions)
-            $transaction->refresh();
+            // Use FOR UPDATE lock to prevent concurrent duplicate creation
+            $lockedTransaction = ChurchTransaction::where('ChurchTransactionID', $transaction->ChurchTransactionID)
+                ->lockForUpdate()
+                ->first();
+            
+            if (!$lockedTransaction) {
+                Log::error('Transaction not found or locked', ['transaction_id' => $transaction->ChurchTransactionID]);
+                DB::rollBack();
+                return null;
+            }
+            
+            // Use the locked transaction instance
+            $transaction = $lockedTransaction;
             
             // Check if appointment was already created
             if ($transaction->appointment_id) {
