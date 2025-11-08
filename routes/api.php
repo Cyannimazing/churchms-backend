@@ -54,9 +54,8 @@ Route::get('/provinces', [LocationController::class, 'getProvinces']);
 Route::get('/provinces/{provinceId}/cities', [LocationController::class, 'getCitiesByProvince']);
 Route::get('/locations', [LocationController::class, 'getAllLocations']);
 
-// Public file endpoints (no auth for binary files to avoid CORS complexity)
+// Public file endpoints (profile pictures only - documents require auth)
 Route::get('/churches/{churchId}/profile-picture', [ChurchController::class, 'getProfilePicture'])->name('churches.profilePicture.public');
-Route::get('/documents/{documentId}', [ChurchController::class, 'downloadDocument'])->name('documents.download.public');
 
 //USERS
 Route::middleware(['auth:sanctum'])->get('/user', function (Request $request) {
@@ -150,7 +149,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('/churches/{churchId}/publish', [ChurchController::class, 'togglePublish'])->name('churches.togglePublish');
     Route::put('/churches/{churchId}/disable', [ChurchController::class, 'disableChurch'])->name('churches.disable');
     Route::get('/churches/{churchId}/documents', [ChurchController::class, 'reviewDocuments'])->name('churches.reviewDocuments');
-    // Document download moved to public section above to avoid CORS with blob fetch
+    // Document download - protected with authentication and authorization
+    Route::get('/documents/{documentId}', [ChurchController::class, 'downloadDocument'])->name('documents.download');
     Route::get('/churches/{churchId}', [ChurchController::class, 'show'])->name('churches.show');
     // Route moved to public section above to avoid auth headers for image fetch
     Route::post('/churches/{churchId}/update', [ChurchController::class, 'update'])->name('churches.update');

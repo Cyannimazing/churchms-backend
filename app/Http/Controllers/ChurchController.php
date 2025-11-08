@@ -486,6 +486,30 @@ class ChurchController extends Controller
             // Get the specific document by ID using findOrFail to ensure we get the exact document
             $document = ChurchOwnerDocument::findOrFail($documentId);
             
+            // Get the church associated with this document
+            $church = Church::findOrFail($document->ChurchID);
+            
+            // Authorization: Only allow access to:
+            // 1. System Admins (system_role_id = 1)
+            // 2. Church Owner (user_id matches church owner)
+            $user = Auth::user();
+            
+            if (!$user) {
+                return response()->json(['error' => 'Unauthorized. Please login.'], 401);
+            }
+            
+            $isSystemAdmin = $user->profile && $user->profile->system_role_id === 1;
+            $isChurchOwner = $church->user_id === $user->id;
+            
+            if (!$isSystemAdmin && !$isChurchOwner) {
+                Log::warning('Unauthorized document access attempt', [
+                    'user_id' => $user->id,
+                    'document_id' => $documentId,
+                    'church_id' => $document->ChurchID
+                ]);
+                return response()->json(['error' => 'Unauthorized. You do not have permission to access this document.'], 403);
+            }
+            
             // Get the correct file path
             $filePath = $document->DocumentPath ?? '';
             if (!$filePath) {
