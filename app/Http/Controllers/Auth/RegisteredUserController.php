@@ -23,11 +23,11 @@ class RegisteredUserController extends Controller
             'email' => ['required', 'email', 'max:255', 'unique:users,email'],
             'password' => ['required', 'confirmed', Rules\Password::defaults()],
             'role_id' => ['required', 'in:1,2'],
-            'first_name' => ['nullable', 'string', 'max:100'],
+            'first_name' => ['required', 'string', 'max:100'],
             'middle_name' => ['nullable', 'string', 'max:1'],
-            'last_name' => ['nullable', 'string', 'max:100'],
-            'address' => ['nullable', 'string'],
-            'contact_number' => ['nullable', 'string', 'max:20'],
+            'last_name' => ['required', 'string', 'max:100'],
+            'address' => ['required', 'string'],
+            'contact_number' => ['required', 'string', 'max:20'],
         ]);
 
         $user = User::create([
