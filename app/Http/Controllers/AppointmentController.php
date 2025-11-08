@@ -4381,7 +4381,7 @@ class AppointmentController extends Controller
                     'Appointment.AppointmentDate',
                     'st.StartTime',
                     'st.EndTime',
-                    DB::raw("COALESCE(p.first_name, '') || ' ' || COALESCE(p.middle_name || '. ', '') || COALESCE(p.last_name, '') as UserName"),
+                    DB::raw("CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(CONCAT(p.middle_name, '. '), ''), COALESCE(p.last_name, '')) as UserName"),
                     'users.email as UserEmail'
                 )
                 ->orderBy('st.StartTime')
