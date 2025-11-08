@@ -220,7 +220,9 @@ class ChurchController extends Controller
                 $adminRole->permissions()->attach($allPermissions->pluck('PermissionID'));
 
                 // Notify all system admins about the new church application
-                $systemAdmins = UserProfile::where('system_role_id', 1)->pluck('user_id');
+                $systemAdmins = UserProfile::whereHas('systemRole', function($q) {
+                    $q->where('role_name', 'Admin');
+                })->pluck('user_id');
                 
                 $ownerName = trim(($user->profile->first_name ?? '') . ' ' . ($user->profile->last_name ?? '')) ?: $user->email;
                 
@@ -377,7 +379,9 @@ class ChurchController extends Controller
 
         // Notify all system admins about status change
         if ($oldStatus !== $validated['ChurchStatus']) {
-            $systemAdmins = UserProfile::where('system_role_id', 1)->pluck('user_id');
+            $systemAdmins = UserProfile::whereHas('systemRole', function($q) {
+                $q->where('role_name', 'Admin');
+            })->pluck('user_id');
             $ownerName = trim(($church->owner->profile->first_name ?? '') . ' ' . ($church->owner->profile->last_name ?? '')) ?: $church->owner->email;
             
             foreach ($systemAdmins as $adminId) {
@@ -949,7 +953,9 @@ class ChurchController extends Controller
                 
                 // Notify system admins if this is a resubmission
                 if ($isResubmission) {
-                    $systemAdmins = UserProfile::where('system_role_id', 1)->pluck('user_id');
+                    $systemAdmins = UserProfile::whereHas('systemRole', function($q) {
+                        $q->where('role_name', 'Admin');
+                    })->pluck('user_id');
                     $ownerName = trim(($church->owner->profile->first_name ?? '') . ' ' . ($church->owner->profile->last_name ?? '')) ?: $church->owner->email;
                     
                     foreach ($systemAdmins as $adminId) {
