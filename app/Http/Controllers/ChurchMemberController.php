@@ -486,8 +486,8 @@ class ChurchMemberController extends Controller
             $memberNotification = Notification::create([
                 'user_id' => $churchMember->user_id,
                 'type' => 'member_kicked',
-                'title' => 'Membership Status Changed',
-                'message' => "Your membership at {$churchName} has been set to 'Away'. You can now register at another church.",
+                'title' => 'You Have Been Kicked',
+                'message' => "You have been kicked from {$churchName}. You can now register at another church.",
                 'data' => [
                     'member_id' => $churchMember->id,
                     'member_name' => $memberName,
