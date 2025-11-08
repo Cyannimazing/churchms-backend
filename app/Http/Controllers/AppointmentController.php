@@ -3750,11 +3750,11 @@ class AppointmentController extends Controller
             ]);
             event(new NotificationCreated($user->id, $userNotification));
 
-            // Also notify active staff members with view_appointments permission
+            // Also notify active staff members with appointment_list permission
             $staffMembers = \App\Models\UserChurchRole::where('ChurchID', $churchId)
                 ->whereHas('role', function($query) {
                     $query->whereHas('permissions', function($permQuery) {
-                        $permQuery->where('PermissionName', 'view_appointments');
+                        $permQuery->where('PermissionName', 'appointment_list');
                     });
                 })
                 ->get();
