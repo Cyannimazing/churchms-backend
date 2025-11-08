@@ -1379,6 +1379,42 @@ class AppointmentController extends Controller
             $newStatus = $request->status;
             $oldStatus = $appointment->Status;
 
+            // If marking as Completed, verify all sub-services are completed
+            if ($newStatus === 'Completed') {
+                $serviceId = $appointment->ServiceID;
+                
+                // Get all active sub-services for this sacrament service
+                $activeSubServices = DB::table('sub_service')
+                    ->where('ServiceID', $serviceId)
+                    ->where('IsActive', true)
+                    ->pluck('SubServiceID');
+                
+                if ($activeSubServices->isNotEmpty()) {
+                    // Check completion status of all active sub-services for this appointment
+                    $completedSubServices = DB::table('appointment_sub_service_status')
+                        ->where('AppointmentID', $appointmentId)
+                        ->whereIn('SubServiceID', $activeSubServices)
+                        ->where('isCompleted', true)
+                        ->pluck('SubServiceID');
+                    
+                    // Find which sub-services are not yet completed
+                    $incompleteSubServices = $activeSubServices->diff($completedSubServices);
+                    
+                    if ($incompleteSubServices->isNotEmpty()) {
+                        // Get the names of incomplete sub-services for error message
+                        $incompleteNames = DB::table('sub_service')
+                            ->whereIn('SubServiceID', $incompleteSubServices)
+                            ->pluck('SubServiceName')
+                            ->toArray();
+                        
+                        return response()->json([
+                            'error' => 'Cannot mark appointment as Completed. All sub-services must be completed first.',
+                            'incomplete_sub_services' => $incompleteNames
+                        ], 422);
+                    }
+                }
+            }
+
             // Start database transaction for atomic operations
             DB::beginTransaction();
 
