@@ -88,7 +88,9 @@ class DashboardController extends Controller
             });
 
         // 3. Member Applications
-        $totalMembers = ChurchMember::where('church_id', $churchId)->count();
+        $totalMembers = ChurchMember::where('church_id', $churchId)
+            ->where('status', 'approved')
+            ->count();
         
         $membersByStatus = ChurchMember::where('church_id', $churchId)
             ->select('status', DB::raw('count(*) as count'))
