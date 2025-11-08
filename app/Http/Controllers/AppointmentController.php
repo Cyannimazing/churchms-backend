@@ -1301,8 +1301,8 @@ class AppointmentController extends Controller
                 ->join('users as u', 'a.UserID', '=', 'u.id')
                 ->join('user_profiles as p', 'u.id', '=', 'p.user_id')
                 ->join('sacrament_service as s', 'a.ServiceID', '=', 's.ServiceID')
-                ->join('schedule_times as st', 'a.ScheduleTimeID', '=', 'st.ScheduleTimeID')
-                ->join('service_schedules as ss', 'st.ScheduleID', '=', 'ss.ScheduleID')
+                ->leftJoin('schedule_times as st', 'a.ScheduleTimeID', '=', 'st.ScheduleTimeID')
+                ->leftJoin('service_schedules as ss', 'st.ScheduleID', '=', 'ss.ScheduleID')
                 ->leftJoin('sub_sacrament_services as sss', 'ss.SubSacramentServiceID', '=', 'sss.SubSacramentServiceID')
                 ->where('a.ChurchID', $church->ChurchID)
                 ->orderBy('a.created_at', 'asc')
@@ -1320,7 +1320,7 @@ class AppointmentController extends Controller
                     'p.first_name',
                     'p.middle_name',
                     'p.last_name',
-                    DB::raw("COALESCE(p.first_name, '') || ' ' || COALESCE(p.middle_name || '. ', '') || COALESCE(p.last_name, '') as UserName"),
+                    DB::raw("CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(CONCAT(p.middle_name, '. '), ''), COALESCE(p.last_name, '')) as UserName"),
                     's.ServiceID',
                     's.ServiceName',
                     's.Description as ServiceDescription',
@@ -4368,13 +4368,12 @@ class AppointmentController extends Controller
             }
 
             // Get all approved appointments for this service on the specified date and time
-            $appointments = DB::table('Appointment')
+            $query = DB::table('Appointment')
                 ->join('users', 'Appointment.UserID', '=', 'users.id')
                 ->join('user_profiles as p', 'users.id', '=', 'p.user_id')
-                ->join('schedule_times as st', 'Appointment.ScheduleTimeID', '=', 'st.ScheduleTimeID')
+                ->leftJoin('schedule_times as st', 'Appointment.ScheduleTimeID', '=', 'st.ScheduleTimeID')
                 ->where('Appointment.ServiceID', $serviceId)
                 ->where('Appointment.Status', 'Approved')
-                ->where('Appointment.ScheduleTimeID', $scheduleTimeId)
                 ->whereDate('Appointment.AppointmentDate', $date)
                 ->select(
                     'Appointment.AppointmentID',
@@ -4383,9 +4382,12 @@ class AppointmentController extends Controller
                     'st.EndTime',
                     DB::raw("CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(CONCAT(p.middle_name, '. '), ''), COALESCE(p.last_name, '')) as UserName"),
                     'users.email as UserEmail'
-                )
-                ->orderBy('st.StartTime')
-                ->get();
+                );
+
+            // Filter by the exact selected schedule time (required)
+            $query->where('Appointment.ScheduleTimeID', $scheduleTimeId);
+
+            $appointments = $query->orderBy('st.StartTime')->get();
 
             // Get form configuration for this service
             $formElements = DB::table('service_input_field')
