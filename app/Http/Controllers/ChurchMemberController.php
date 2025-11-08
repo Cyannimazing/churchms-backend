@@ -475,6 +475,86 @@ class ChurchMemberController extends Controller
             'notes' => $request->notes ?? 'Member status set to away - can register at another church'
         ]);
 
+        // Get member and church info for notifications
+        $memberName = trim($churchMember->first_name . ' ' . $churchMember->last_name);
+        $church = Church::find($churchMember->church_id);
+        $churchName = $church ? $church->ChurchName : 'the church';
+        $churchNameSlug = $church ? strtolower(str_replace(' ', '-', $church->ChurchName)) : 'church';
+
+        // 1. Notify the member
+        if ($churchMember->user_id) {
+            $memberNotification = Notification::create([
+                'user_id' => $churchMember->user_id,
+                'type' => 'member_kicked',
+                'title' => 'Membership Status Changed',
+                'message' => "Your membership at {$churchName} has been set to 'Away'. You can now register at another church.",
+                'data' => [
+                    'member_id' => $churchMember->id,
+                    'member_name' => $memberName,
+                    'church_id' => $churchMember->church_id,
+                    'church_name' => $churchName,
+                    'status' => 'away',
+                    'link' => '/profile/memberships',
+                ],
+                'is_read' => false,
+            ]);
+            
+            // Broadcast to member's private channel
+            broadcast(new NotificationCreated($churchMember->user_id, $memberNotification));
+        }
+
+        // 2. Notify church owner
+        if ($church && $church->user_id) {
+            $ownerNotification = Notification::create([
+                'user_id' => $church->user_id,
+                'type' => 'member_kicked',
+                'title' => 'Member Kicked',
+                'message' => "{$memberName} has been removed from {$churchName} and can now register at another church.",
+                'data' => [
+                    'member_id' => $churchMember->id,
+                    'member_name' => $memberName,
+                    'church_id' => $churchMember->church_id,
+                    'church_name' => $churchName,
+                    'status' => 'away',
+                    'link' => "/{$churchNameSlug}/member-directory",
+                ],
+                'is_read' => false,
+            ]);
+            
+            // Broadcast to owner's private channel
+            broadcast(new NotificationCreated($church->user_id, $ownerNotification));
+        }
+
+        // 3. Notify all church staff
+        $staffUserIds = UserChurchRole::where('ChurchID', $churchMember->church_id)
+            ->pluck('user_id');
+        
+        foreach ($staffUserIds as $staffUserId) {
+            // Skip if this is the church owner (already notified)
+            if ($church && $staffUserId == $church->user_id) {
+                continue;
+            }
+            
+            $staffNotification = Notification::create([
+                'user_id' => $staffUserId,
+                'type' => 'member_kicked',
+                'title' => 'Member Kicked',
+                'message' => "{$memberName} has been removed from {$churchName} and can now register at another church.",
+                'data' => [
+                    'member_id' => $churchMember->id,
+                    'member_name' => $memberName,
+                    'church_id' => $churchMember->church_id,
+                    'church_name' => $churchName,
+                    'status' => 'away',
+                    'link' => "/{$churchNameSlug}/member-directory",
+                ],
+                'is_read' => false,
+            ]);
+            
+            // Broadcast to staff member's private channel
+            broadcast(new NotificationCreated($staffUserId, $staffNotification));
+        }
+
         return response()->json([
             'message' => 'Member status set to away successfully. They can now register at another church.',
             'member' => $churchMember->fresh()
