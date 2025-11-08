@@ -3729,6 +3729,7 @@ class AppointmentController extends Controller
             event(new NotificationCreated($church->user_id, $notification));
 
             // Create notification for the applicant (regular user)
+            // Note: Do not include sub_services here - they will be shown when appointment is approved
             $userNotification = Notification::create([
                 'user_id' => $user->id,
                 'type' => 'appointment_submitted',
@@ -3744,7 +3745,7 @@ class AppointmentController extends Controller
                     'service_id' => $service->ServiceID,
                     'service_name' => $service->ServiceName,
                     'appointment_date' => $appointmentDateTime,
-                    'sub_services' => $subServiceData,
+                    // sub_services intentionally omitted - only shown on approval
                 ],
             ]);
             event(new NotificationCreated($user->id, $userNotification));
