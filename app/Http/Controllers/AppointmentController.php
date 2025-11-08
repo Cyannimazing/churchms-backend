@@ -2710,6 +2710,7 @@ class AppointmentController extends Controller
             }
 
             // Check if an appointment was already created for this payment session
+            // First check for transactions that already have appointment_id set
             $existingTransactionForSession = ChurchTransaction::where('paymongo_session_id', $sessionId)
                 ->whereNotNull('appointment_id')
                 ->first();
@@ -2721,6 +2722,19 @@ class AppointmentController extends Controller
                     'transaction_id' => $existingTransactionForSession->ChurchTransactionID
                 ]);
                 return $existingTransactionForSession;
+            }
+            
+            // Also check for any pending transaction with this session (even without appointment_id yet)
+            // This prevents duplicate appointments when payment callback is triggered multiple times
+            $existingPendingTransaction = ChurchTransaction::where('paymongo_session_id', $sessionId)
+                ->whereNull('appointment_id')
+                ->first();
+            
+            if ($existingPendingTransaction) {
+                Log::info('Found existing pending transaction for this session, will create appointment and update transaction', [
+                    'session_id' => $sessionId,
+                    'transaction_id' => $existingPendingTransaction->ChurchTransactionID
+                ]);
             }
             
             // Check if appointment already exists (legacy check for backward compatibility)
@@ -2801,38 +2815,69 @@ class AppointmentController extends Controller
             $slotDate = \Carbon\Carbon::parse($appointmentDate)->format('Y-m-d');
             $this->adjustRemainingSlots($scheduleTimeId, $slotDate, -1, $schedule->SlotCapacity);
             
-            // Create transaction record
+            // Update existing pending transaction or create a new one
             $amountPaid = ($attributes['amount'] ?? 0) / 100;
             $paymentMethod = $attributes['payment_method_used'] ?? 'multi';
             $user = \App\Models\User::find($userId);
             
-            $transaction = ChurchTransaction::create([
-                'user_id' => $userId,
-                'church_id' => $churchId,
-                'appointment_id' => $appointmentId,
-                'receipt_code' => $this->generateReceiptCode(),
-                'paymongo_session_id' => $sessionId,
-                'payment_method' => $paymentMethod,
-                'amount_paid' => $amountPaid,
-                'currency' => 'PHP',
-                'transaction_type' => 'appointment_payment',
-                'transaction_date' => now(),
-                'notes' => sprintf(
-                    '%s appointment payment for %s - %s on %s',
-                    ucfirst($paymentMethod === 'multi' ? 'GCash' : $paymentMethod),
-                    $church->ChurchName,
-                    $service->ServiceName,
-                    $appointmentDate
-                ),
-                'metadata' => [
-                    'church_name' => $church->ChurchName,
-                    'service_name' => $service->ServiceName,
-                    'appointment_date' => $appointmentDate,
-                    'schedule_time' => $scheduleTimeId,
-                    'is_mass' => $service->isMass ?? false,
-                    'original_session_data' => $metadata
-                ]
-            ]);
+            if ($existingPendingTransaction) {
+                // Update the existing pending transaction with appointment_id and payment details
+                $existingPendingTransaction->update([
+                    'appointment_id' => $appointmentId,
+                    'status' => 'completed',
+                    'payment_method' => $paymentMethod,
+                    'notes' => sprintf(
+                        '%s appointment payment for %s - %s on %s',
+                        ucfirst($paymentMethod === 'multi' ? 'GCash' : $paymentMethod),
+                        $church->ChurchName,
+                        $service->ServiceName,
+                        $appointmentDate
+                    ),
+                    'metadata' => [
+                        'church_name' => $church->ChurchName,
+                        'service_name' => $service->ServiceName,
+                        'appointment_date' => $appointmentDate,
+                        'schedule_time' => $scheduleTimeId,
+                        'is_mass' => $service->isMass ?? false,
+                        'original_session_data' => $metadata
+                    ]
+                ]);
+                $transaction = $existingPendingTransaction;
+                Log::info('Updated existing pending transaction with appointment', [
+                    'transaction_id' => $transaction->ChurchTransactionID,
+                    'appointment_id' => $appointmentId
+                ]);
+            } else {
+                // Create new transaction record
+                $transaction = ChurchTransaction::create([
+                    'user_id' => $userId,
+                    'church_id' => $churchId,
+                    'appointment_id' => $appointmentId,
+                    'receipt_code' => $this->generateReceiptCode(),
+                    'paymongo_session_id' => $sessionId,
+                    'payment_method' => $paymentMethod,
+                    'amount_paid' => $amountPaid,
+                    'currency' => 'PHP',
+                    'transaction_type' => 'appointment_payment',
+                    'status' => 'completed',
+                    'transaction_date' => now(),
+                    'notes' => sprintf(
+                        '%s appointment payment for %s - %s on %s',
+                        ucfirst($paymentMethod === 'multi' ? 'GCash' : $paymentMethod),
+                        $church->ChurchName,
+                        $service->ServiceName,
+                        $appointmentDate
+                    ),
+                    'metadata' => [
+                        'church_name' => $church->ChurchName,
+                        'service_name' => $service->ServiceName,
+                        'appointment_date' => $appointmentDate,
+                        'schedule_time' => $scheduleTimeId,
+                        'is_mass' => $service->isMass ?? false,
+                        'original_session_data' => $metadata
+                    ]
+                ]);
+            }
 
             DB::commit();
 
