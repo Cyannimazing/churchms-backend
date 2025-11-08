@@ -375,33 +375,31 @@ class ChurchController extends Controller
         $oldStatus = $church->ChurchStatus;
         $church->update(['ChurchStatus' => $validated['ChurchStatus']]);
 
-        // Notify church owner about status change
-        if ($church->user_id && $oldStatus !== $validated['ChurchStatus']) {
-            $statusMessages = [
-                Church::STATUS_ACTIVE => 'Your church registration has been approved! You can now configure your church settings.',
-                Church::STATUS_REJECTED => 'Your church registration has been rejected. Please review the feedback and resubmit your application.',
-                Church::STATUS_DISABLED => 'Your church has been disabled by the system administrator.',
-            ];
+        // Notify all system admins about status change
+        if ($oldStatus !== $validated['ChurchStatus']) {
+            $systemAdmins = UserProfile::where('system_role_id', 1)->pluck('user_id');
+            $ownerName = trim(($church->owner->profile->first_name ?? '') . ' ' . ($church->owner->profile->last_name ?? '')) ?: $church->owner->email;
             
-            $message = $statusMessages[$validated['ChurchStatus']] ?? "Your church status has been updated to {$validated['ChurchStatus']}.";
-            
-            $notification = Notification::create([
-                'user_id' => $church->user_id,
-                'type' => 'church_status_changed',
-                'title' => 'Church Application Status Updated',
-                'message' => $message,
-                'data' => [
-                    'church_id' => $church->ChurchID,
-                    'church_name' => $church->ChurchName,
-                    'old_status' => $oldStatus,
-                    'new_status' => $validated['ChurchStatus'],
-                    'link' => '/church-owner/churches',
-                ],
-                'is_read' => false,
-            ]);
-            
-            // Broadcast to church owner
-            broadcast(new NotificationCreated($church->user_id, $notification));
+            foreach ($systemAdmins as $adminId) {
+                $notification = Notification::create([
+                    'user_id' => $adminId,
+                    'type' => 'church_status_changed',
+                    'title' => 'Church Status Updated',
+                    'message' => "Church '{$church->ChurchName}' status changed from {$oldStatus} to {$validated['ChurchStatus']}.",
+                    'data' => [
+                        'church_id' => $church->ChurchID,
+                        'church_name' => $church->ChurchName,
+                        'owner_name' => $ownerName,
+                        'old_status' => $oldStatus,
+                        'new_status' => $validated['ChurchStatus'],
+                        'link' => '/church-ms-taupe.vercel.app/application',
+                    ],
+                    'is_read' => false,
+                ]);
+                
+                // Broadcast to each admin
+                broadcast(new NotificationCreated($adminId, $notification));
+            }
         }
 
         return response()->json([
