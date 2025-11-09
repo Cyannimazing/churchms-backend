@@ -19,14 +19,7 @@ class AuthenticatedSessionController extends Controller
 
         $user = $request->user();
         
-        // Check if user already has an active session
-        if ($user->tokens()->count() > 0) {
-            return response()->json([
-                'message' => 'This account is already logged in on another device. Please log out from the other device first.'
-            ], 403);
-        }
-        
-        // Create new token
+        // Create a new token for this device/session (allow multiple concurrent tokens)
         $token = $user->createToken('auth-token')->plainTextToken;
 
         return response()->json([
