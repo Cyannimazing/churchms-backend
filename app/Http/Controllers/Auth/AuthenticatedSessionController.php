@@ -19,8 +19,12 @@ class AuthenticatedSessionController extends Controller
 
         $user = $request->user();
         
-        // Delete old tokens
-        $user->tokens()->delete();
+        // Check if user already has an active session
+        if ($user->tokens()->count() > 0) {
+            return response()->json([
+                'message' => 'This account is already logged in on another device. Please log out from the other device first.'
+            ], 403);
+        }
         
         // Create new token
         $token = $user->createToken('auth-token')->plainTextToken;
@@ -36,7 +40,8 @@ class AuthenticatedSessionController extends Controller
      */
     public function destroy(Request $request): Response
     {
-        // Delete the current access token
+        // Only delete the current access token (not all user tokens)
+        // This ensures logging out from one device doesn't affect other devices
         $request->user()->currentAccessToken()->delete();
 
         return response()->noContent();
