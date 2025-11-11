@@ -52,7 +52,7 @@ class RegisteredUserController extends Controller
         // Auto-assign Free Plan for Church Owners
         if ($request->role_id == 2) {
             // Only use the Free Plan that already exists (from seeder). Do NOT create one here.
-            $freePlan = SubscriptionPlan::where('PlanName', 'Free Plan')->first();
+            $freePlan = SubscriptionPlan::where('PlanName', 'Free')->first();
 
             if ($freePlan) {
                 // Avoid accidental duplicates: if user somehow already has any subscription, skip
@@ -62,8 +62,8 @@ class RegisteredUserController extends Controller
 
                 if (!$existingSub) {
                     $startDate = now();
-                    $months = max(1, (int)($freePlan->DurationInMonths ?? 1));
-                    $endDate = $startDate->copy()->addMonths($months);
+                    // For testing: 3 minutes trial
+                    $endDate = $startDate->copy()->addMinutes(3);
 
                     // Create church subscription with Free Plan from seeder
                     ChurchSubscription::create([
@@ -81,7 +81,7 @@ class RegisteredUserController extends Controller
                         'PaymentMethod' => 'Free Trial',
                         'AmountPaid' => 0.00,
                         'TransactionDate' => now(),
-                        'Notes' => 'Free trial subscription automatically assigned during ChurchOwner registration',
+                        'Notes' => 'Free trial subscription automatically assigned during ChurchOwner registration (3min test)',
                     ]);
                 }
             }
