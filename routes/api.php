@@ -342,3 +342,21 @@ Route::middleware('auth:sanctum')->group(function () {
 
 // Public certificate verification (no auth required)
 Route::get('/verify-certificate/{token}', [CertificateConfigurationController::class, 'verifyCertificate'])->name('certificate.verify');
+
+// Cron endpoint for external services to trigger Laravel scheduler
+Route::get('/cron/schedule', function () {
+    // Simple security: check for a secret token
+    $token = request()->query('token');
+    
+    if ($token !== config('app.cron_token')) {
+        abort(403, 'Unauthorized');
+    }
+    
+    Artisan::call('schedule:run');
+    
+    return response()->json([
+        'status' => 'success',
+        'message' => 'Scheduler executed',
+        'timestamp' => now()
+    ]);
+})->name('cron.schedule');

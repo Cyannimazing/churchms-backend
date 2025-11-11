@@ -123,4 +123,16 @@ return [
         'store' => env('APP_MAINTENANCE_STORE', 'database'),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Cron Token
+    |--------------------------------------------------------------------------
+    |
+    | This token is used to secure the cron endpoint that external services
+    | will call to trigger Laravel's scheduler.
+    |
+    */
+
+    'cron_token' => env('CRON_TOKEN'),
+
 ];
