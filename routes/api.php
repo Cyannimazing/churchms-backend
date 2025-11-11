@@ -69,7 +69,6 @@ Route::get('/login', function () {
 
 //USERS
 Route::middleware(['auth:sanctum'])->get('/user', function (Request $request) {
-    Artisan::call('subscriptions:update');
     
     $user = $request->user()->load(['profile.systemRole', 'contact']);
     
