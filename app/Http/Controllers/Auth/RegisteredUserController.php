@@ -74,15 +74,7 @@ class RegisteredUserController extends Controller
                         'Status' => 'Active',
                     ]);
 
-                    // Create transaction record for the free plan
-                    SubscriptionTransaction::create([
-                        'user_id' => $user->id,
-                        'NewPlanID' => $freePlan->PlanID,
-                        'PaymentMethod' => 'Free Trial',
-                        'AmountPaid' => 0.00,
-                        'TransactionDate' => now(),
-                        'Notes' => 'Free trial subscription automatically assigned during ChurchOwner registration (3min test)',
-                    ]);
+                    // Don't create a transaction for the free trial - it's automatic
                 }
             }
         }
