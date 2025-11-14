@@ -87,7 +87,18 @@ class PayMongoService
                     'data' => [
                         'attributes' => array_filter((function() use ($amount, $description, $paymentMethods, $successUrl, $cancelUrl, $metadata) {
                             $ref = $metadata['reference_number'] ?? ($metadata['receipt_code'] ?? null);
-                            $lineItemName = $ref ? ($description . ' (Ref: ' . $ref . ')') : $description;
+                            
+                            // Line item name shown in checkout & order details. We keep it clean
+                            // (no reference number) even if the description contains one.
+                            $lineItemName = $description;
+                            if ($ref) {
+                                // Remove common "[Ref: ...]" or "(Ref: ...)" patterns from description
+                                $lineItemName = preg_replace('/\s*\[Ref:[^\]]+\]\s*/i', ' ', $lineItemName);
+                                $lineItemName = preg_replace('/\s*\(Ref:[^)]+\)\s*/i', ' ', $lineItemName);
+                                // Collapse extra spaces
+                                $lineItemName = trim(preg_replace('/\s+/', ' ', $lineItemName));
+                            }
+                            
                             return [
                                 'send_email_receipt' => true,
                                 'show_description' => true,
