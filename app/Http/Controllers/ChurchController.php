@@ -32,7 +32,7 @@ class ChurchController extends Controller
     {
         // Validate the request
         $validated = $request->validate([
-            'ChurchName' => 'required|string|max:255|unique:Church,ChurchName',
+'ChurchName' => ['required','string','max:255','unique:Church,ChurchName','regex:/^[A-Za-z0-9 ]+$/'],
             'Latitude' => 'required|numeric|between:-90,90',
             'Longitude' => 'required|numeric|between:-180,180',
             'Street' => 'nullable|string|max:255',
@@ -50,8 +50,9 @@ class ChurchController extends Controller
             'AuthorizationLetter' => 'nullable|file|mimes:jpeg,png,jpg,pdf|max:5120',
             'RepresentativeID' => 'nullable|file|mimes:jpeg,png,jpg,pdf|max:5120',
         ], [
-            'ChurchName.unique' => 'A church with this name already exists.',
+'ChurchName.unique' => 'A church with this name already exists.',
             'ChurchName.required' => 'Church name is required.',
+            'ChurchName.regex' => 'Church name may only contain letters, numbers, and spaces.',
             'Latitude.required' => 'Latitude is required.',
             'Longitude.required' => 'Longitude is required.',
             'City.required' => 'City is required.',
