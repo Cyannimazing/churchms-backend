@@ -49,18 +49,20 @@ class DatabaseSeeder extends Seeder
             'PlanName' => 'Basic',
         ], [
             'Price' => 29.99,
-            'DurationInMonths' => 1,
+            // 12-month subscription for Basic plan
+            'DurationInMonths' => 12,
             'MaxChurchesAllowed' => 2,
-            'Description' => 'Basic plan for church owners',
+            'Description' => 'Basic annual plan for church owners',
         ]);
 
         SubscriptionPlan::firstOrCreate([
             'PlanName' => 'Premium',
         ], [
             'Price' => 49.99,
-            'DurationInMonths' => 1,
+            // 12-month subscription for Premium plan
+            'DurationInMonths' => 12,
             'MaxChurchesAllowed' => 3,
-            'Description' => 'Premium plan for church owners',
+            'Description' => 'Premium annual plan for church owners',
         ]);
 
         // Get role IDs for system_roles table
