@@ -350,24 +350,41 @@ class SacramentServiceController extends Controller
                 }
                 // If isMultipleService but no sub_sacrament_services in request, keep existing variants
 
-                // Delete existing sub-services (cascade will delete schedules)
-                SubService::where('ServiceID', $serviceId)->delete();
+                // Upsert sub-services so their IDs (and related submission state) are preserved
+                $existingSubServices = SubService::where('ServiceID', $serviceId)
+                    ->get()
+                    ->keyBy('SubServiceID');
+                $processedSubServiceIds = [];
 
-                // Create new sub-services if provided
                 if ($request->has('sub_services') && is_array($request->sub_services)) {
                     foreach ($request->sub_services as $subServiceData) {
-                        $subService = SubService::create([
+                        $subServiceId = $subServiceData['id'] ?? null;
+
+                        $subServicePayload = [
                             'ServiceID' => $sacramentService->ServiceID,
                             'SubServiceName' => $subServiceData['SubServiceName'],
                             'Description' => $subServiceData['Description'] ?? null,
                             'IsActive' => $subServiceData['IsActive'] ?? true,
-                        ]);
+                        ];
 
-                        // Create schedules for this sub-service
+                        if ($subServiceId && isset($existingSubServices[$subServiceId])) {
+                            // Update existing sub-service
+                            $subService = $existingSubServices[$subServiceId];
+                            $subService->update($subServicePayload);
+                        } else {
+                            // Create new sub-service
+                            $subService = SubService::create($subServicePayload);
+                            $subServiceId = $subService->SubServiceID;
+                        }
+
+                        $processedSubServiceIds[] = $subServiceId;
+
+                        // Replace schedules for this sub-service (no submission state tied to schedules)
+                        SubServiceSchedule::where('SubServiceID', $subServiceId)->delete();
                         if (isset($subServiceData['schedules']) && is_array($subServiceData['schedules'])) {
                             foreach ($subServiceData['schedules'] as $scheduleData) {
                                 SubServiceSchedule::create([
-                                    'SubServiceID' => $subService->SubServiceID,
+                                    'SubServiceID' => $subServiceId,
                                     'DayOfWeek' => $scheduleData['DayOfWeek'],
                                     'StartTime' => $scheduleData['StartTime'],
                                     'EndTime' => $scheduleData['EndTime'],
@@ -376,18 +393,52 @@ class SacramentServiceController extends Controller
                                 ]);
                             }
                         }
-                        
-                        // Create requirements for this sub-service
+
+                        // Upsert requirements for this sub-service
+                        $existingSubReqs = SubServiceRequirement::where('SubServiceID', $subServiceId)
+                            ->orderBy('SortOrder')
+                            ->get()
+                            ->keyBy('RequirementID');
+                        $processedReqIds = [];
+
                         if (isset($subServiceData['requirements']) && is_array($subServiceData['requirements'])) {
                             foreach ($subServiceData['requirements'] as $index => $requirementData) {
-                                SubServiceRequirement::create([
-                                    'SubServiceID' => $subService->SubServiceID,
+                                $reqId = $requirementData['id'] ?? null;
+
+                                $payload = [
+                                    'SubServiceID' => $subServiceId,
                                     'RequirementName' => $requirementData['RequirementName'],
                                     'SortOrder' => $index,
-                                ]);
+                                ];
+
+                                if ($reqId && isset($existingSubReqs[$reqId])) {
+                                    // Update existing requirement, keep ID so submissions stay linked
+                                    $existingSubReqs[$reqId]->update($payload);
+                                    $processedReqIds[] = $reqId;
+                                } else {
+                                    // Create new requirement
+                                    $newReq = SubServiceRequirement::create($payload);
+                                    $processedReqIds[] = $newReq->RequirementID;
+                                }
                             }
                         }
+
+                        // Delete removed sub-service requirements
+                        $reqsToDelete = $existingSubReqs->keys()->diff($processedReqIds);
+                        if ($reqsToDelete->isNotEmpty()) {
+                            SubServiceRequirement::where('SubServiceID', $subServiceId)
+                                ->whereIn('RequirementID', $reqsToDelete)
+                                ->delete();
+                        }
                     }
+                }
+
+                // Delete sub-services that were removed from the request
+                $subServicesToDelete = $existingSubServices->keys()->diff($processedSubServiceIds);
+                if ($subServicesToDelete->isNotEmpty()) {
+                    SubService::where('ServiceID', $serviceId)
+                        ->whereIn('SubServiceID', $subServicesToDelete)
+                        ->delete();
                 }
 
                 DB::commit();
@@ -482,8 +533,9 @@ class SacramentServiceController extends Controller
                 $existingFields = ServiceInputField::where('ServiceID', $serviceId)->get()->keyBy('element_id');
                 $processedElementIds = [];
 
-                // Delete existing requirements (they can be recreated safely)
-                ServiceRequirement::where('ServiceID', $serviceId)->delete();
+                // NOTE: Do NOT delete existing requirements here.
+                // Requirement IDs are referenced by appointment_requirement_submissions,
+                // so we must preserve them to keep "Submitted" state for past appointments.
 
                 // Save form elements, preserving existing InputFieldIDs where possible
                 foreach ($request->form_elements as $index => $element) {
@@ -547,18 +599,43 @@ class SacramentServiceController extends Controller
                         ->delete();
                 }
 
-                // Save requirements
+                // Save requirements - preserve existing RequirementID when possible
+                $existingRequirements = ServiceRequirement::where('ServiceID', $serviceId)
+                    ->get()
+                    ->keyBy('RequirementID');
+                $processedRequirementIds = [];
+
                 if (isset($request->requirements) && is_array($request->requirements)) {
                     foreach ($request->requirements as $index => $requirement) {
-                        ServiceRequirement::create([
+                        $requirementId = $requirement['id'] ?? null;
+
+                        $data = [
                             'ServiceID' => $serviceId,
                             'Description' => $requirement['description'],
                             'isNeeded' => $requirement['is_needed'] ?? true,
                             'RequirementType' => 'custom',
                             'RequirementData' => null,
                             'SortOrder' => $index,
-                        ]);
+                        ];
+
+                        if ($requirementId && isset($existingRequirements[$requirementId])) {
+                            // Update existing requirement, keep ID so submissions stay linked
+                            $existingRequirements[$requirementId]->update($data);
+                            $processedRequirementIds[] = $requirementId;
+                        } else {
+                            // Create new requirement
+                            $newReq = ServiceRequirement::create($data);
+                            $processedRequirementIds[] = $newReq->RequirementID;
+                        }
                     }
+                }
+
+                // Delete requirements that were removed from the configuration
+                $requirementsToDelete = $existingRequirements->keys()->diff($processedRequirementIds);
+                if ($requirementsToDelete->isNotEmpty()) {
+                    ServiceRequirement::where('ServiceID', $serviceId)
+                        ->whereIn('RequirementID', $requirementsToDelete)
+                        ->delete();
                 }
 
                 DB::commit();
