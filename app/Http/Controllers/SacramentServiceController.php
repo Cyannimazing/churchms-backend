@@ -916,6 +916,7 @@ class SacramentServiceController extends Controller
                                              ->get()
                                              ->map(function ($requirement) {
                                                  return [
+                                                     'id' => $requirement->RequirementID,
                                                      'description' => $requirement->Description,
                                                      'is_needed' => $requirement->isNeeded,
                                                  ];
