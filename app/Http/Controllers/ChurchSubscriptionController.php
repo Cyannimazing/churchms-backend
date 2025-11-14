@@ -238,12 +238,12 @@ class ChurchSubscriptionController extends Controller
             'receipt_code' => $referenceNumber,
         ];
 
-        // Description (used in PayMongo checkout + email) includes the reference
-        $description = "[Ref: {$referenceNumber}] Subscription to {$plan->PlanName} Plan";
-
+        // Item name shown in order details (no reference number here)
+        $itemName = "Subscription to {$plan->PlanName} Plan";
+        // Description/receipt text can still include the reference number (handled by PayMongo/metadata)
         $result = $paymongoService->createGCashCheckout(
             $plan->Price,
-            $description,
+            $itemName,
             $successUrl,
             $cancelUrl,
             $metadata
@@ -333,13 +333,12 @@ class ChurchSubscriptionController extends Controller
             'receipt_code' => $referenceNumber,
         ];
 
-        // Description (used in PayMongo checkout + email) includes the reference
-        $description = "[Ref: {$referenceNumber}] Subscription to {$plan->PlanName} Plan";
-
         // Always create multi-payment checkout (GCash and Card only)
+        // Item name shown in order details (no reference number here)
+        $itemName = "Subscription to {$plan->PlanName} Plan";
         $result = $paymongoService->createMultiPaymentCheckout(
             $plan->Price,
-            $description,
+            $itemName,
             $successUrl,
             $cancelUrl,
             $metadata
