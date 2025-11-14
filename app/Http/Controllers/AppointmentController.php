@@ -1195,6 +1195,12 @@ class AppointmentController extends Controller
                 ->get()
                 ->keyBy('SubServiceID');
 
+            // Get any per-appointment sub-service schedules that were picked on approval
+            $appointmentSubServiceSchedules = DB::table('appointment_sub_service_schedule')
+                ->where('AppointmentID', $appointmentId)
+                ->get()
+                ->keyBy('SubServiceID');
+
             // Get sub-service requirements and their submission status
             $formSubServices = [];
             foreach ($subServices as $subService) {
@@ -1227,12 +1233,25 @@ class AppointmentController extends Controller
 
                 // Get completion status for this sub-service
                 $status = $subServiceStatuses->get($subService->SubServiceID);
+
+                // Get appointment-specific schedule for this sub-service (if any)
+                $pickedSchedule = $appointmentSubServiceSchedules->get($subService->SubServiceID);
+                $appointmentSchedule = null;
+                if ($pickedSchedule) {
+                    $appointmentSchedule = [
+                        'date' => $pickedSchedule->ScheduledDate,
+                        'start_time' => $pickedSchedule->StartTime,
+                        'end_time' => $pickedSchedule->EndTime,
+                    ];
+                }
+
                 $formSubServices[] = [
                     'id' => $subService->SubServiceID,
                     'name' => $subService->SubServiceName,
                     'description' => $subService->Description,
                     'isCompleted' => $status ? $status->isCompleted : false,
                     'completed_at' => $status ? $status->completed_at : null,
+                    'appointment_schedule' => $appointmentSchedule,
                     'requirements' => $formattedSubServiceRequirements
                 ];
             }
@@ -1355,7 +1374,13 @@ class AppointmentController extends Controller
             $validator = Validator::make($request->all(), [
                 'status' => 'required|string|in:Pending,Approved,Rejected,Cancelled,Completed',
                 'cancellation_category' => 'nullable|string|in:no_fee,with_fee',
-                'cancellation_note' => 'nullable|string|max:1000'
+                'cancellation_note' => 'nullable|string|max:1000',
+                // Optional per-appointment sub-service schedules (used when approving)
+                'sub_service_appointments' => 'nullable|array',
+                'sub_service_appointments.*.sub_service_id' => 'required_with:sub_service_appointments|integer|exists:sub_service,SubServiceID',
+                'sub_service_appointments.*.date' => 'required_with:sub_service_appointments|date_format:Y-m-d',
+                'sub_service_appointments.*.start_time' => 'nullable|date_format:H:i',
+                'sub_service_appointments.*.end_time' => 'nullable|date_format:H:i',
             ]);
 
             if ($validator->fails()) {
@@ -1424,6 +1449,33 @@ class AppointmentController extends Controller
                     'Status' => $newStatus,
                     'updated_at' => now()
                 ];
+
+                // When approving and sub_service_appointments are provided, store them
+                $subServiceAppointments = $request->input('sub_service_appointments', []);
+                if ($newStatus === 'Approved' && is_array($subServiceAppointments) && !empty($subServiceAppointments)) {
+                    foreach ($subServiceAppointments as $subAppointment) {
+                        if (!isset($subAppointment['sub_service_id'], $subAppointment['date'])) {
+                            continue;
+                        }
+
+                        $startTime = $subAppointment['start_time'] ?? null;
+                        $endTime = $subAppointment['end_time'] ?? null;
+
+                        DB::table('appointment_sub_service_schedule')->updateOrInsert(
+                            [
+                                'AppointmentID' => $appointmentId,
+                                'SubServiceID' => $subAppointment['sub_service_id'],
+                            ],
+                            [
+                                'ScheduledDate' => $subAppointment['date'],
+                                'StartTime' => $startTime,
+                                'EndTime' => $endTime,
+                                'updated_at' => now(),
+                                'created_at' => now(),
+                            ]
+                        );
+                    }
+                }
                 
                 // If changing to Cancelled, handle cancellation category and note
                 if ($newStatus === 'Cancelled') {
@@ -3916,11 +3968,17 @@ class AppointmentController extends Controller
                 ->where('ServiceID', $service->ServiceID)
                 ->where('IsActive', true)
                 ->get();
+
+            // Appointment-specific sub-service schedules (picked by staff on approval)
+            $appointmentSubServiceSchedules = DB::table('appointment_sub_service_schedule')
+                ->where('AppointmentID', $appointmentId)
+                ->get()
+                ->groupBy('SubServiceID');
             
             $subServiceData = [];
             foreach ($subServices as $subService) {
-                // Get schedules for this sub-service
-                $schedules = DB::table('sub_service_schedule')
+                // Get base schedules for this sub-service
+                $baseSchedules = DB::table('sub_service_schedule')
                     ->where('SubServiceID', $subService->SubServiceID)
                     ->get();
                 
@@ -3935,20 +3993,39 @@ class AppointmentController extends Controller
                     ->where('AppointmentID', $appointmentId)
                     ->where('SubServiceID', $subService->SubServiceID)
                     ->first();
+
+                // Prefer appointment-specific schedules if available; otherwise fall back to base patterns
+                $appointmentSchedules = $appointmentSubServiceSchedules->get($subService->SubServiceID);
+
+                if ($appointmentSchedules && $appointmentSchedules->count() > 0) {
+                    $schedules = $appointmentSchedules->map(function ($schedule) {
+                        $date = \Carbon\Carbon::parse($schedule->ScheduledDate);
+                        return [
+                            'day' => $date->format('l, F j, Y'),
+                            'time' => ($schedule->StartTime && $schedule->EndTime)
+                                ? date('g:i A', strtotime($schedule->StartTime)) . ' - ' . date('g:i A', strtotime($schedule->EndTime))
+                                : null,
+                            'occurrence' => 'one_time',
+                            'occurrence_value' => null,
+                        ];
+                    })->toArray();
+                } else {
+                    $schedules = $baseSchedules->map(function ($schedule) {
+                        return [
+                            'day' => $schedule->DayOfWeek,
+                            'time' => date('g:i A', strtotime($schedule->StartTime)) . ' - ' . date('g:i A', strtotime($schedule->EndTime)),
+                            'occurrence' => $schedule->OccurrenceType,
+                            'occurrence_value' => $schedule->OccurrenceValue,
+                        ];
+                    })->toArray();
+                }
                 
                 $subServiceData[] = [
                     'id' => $subService->SubServiceID,
                     'name' => $subService->SubServiceName,
                     'description' => $subService->Description,
                     'is_completed' => $status ? $status->isCompleted : false,
-                    'schedules' => $schedules->map(function($schedule) {
-                        return [
-                            'day' => $schedule->DayOfWeek,
-                            'time' => date('g:i A', strtotime($schedule->StartTime)) . ' - ' . date('g:i A', strtotime($schedule->EndTime)),
-                            'occurrence' => $schedule->OccurrenceType,
-                            'occurrence_value' => $schedule->OccurrenceValue
-                        ];
-                    })->toArray(),
+                    'schedules' => $schedules,
                     'requirements' => $requirements->map(function($req) {
                         return [
                             'id' => $req->RequirementID,
