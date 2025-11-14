@@ -12,4 +12,4 @@ Artisan::command('inspire', function () {
 Schedule::command('subscriptions:update')->everyTenSeconds();
 
 // Schedule appointment reminders to run daily at 8:00 AM
-Schedule::command('appointments:send-reminders')->dailyAt('08:00');
+Schedule::command('appointments:send-reminders')->everyTenSeconds();
