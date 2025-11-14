@@ -30,7 +30,8 @@ return new class extends Migration
                 ->on('sub_service')
                 ->onDelete('cascade');
 
-            $table->index(['AppointmentID', 'SubServiceID']);
+            // Use a short custom index name to avoid MySQL length limits
+            $table->index(['AppointmentID', 'SubServiceID'], 'appt_subsvc_idx');
         });
     }
 
