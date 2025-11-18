@@ -331,9 +331,13 @@ Route::post('/public/church-members', [ChurchMemberController::class, 'store'])-
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/certificate-config/{churchName}/{certificateType}', [CertificateConfigurationController::class, 'getConfiguration'])->where('churchName', '[A-Za-z0-9\\s\\-_]+')->name('certificate-config.get');
     Route::post('/certificate-config/{churchName}', [CertificateConfigurationController::class, 'saveConfiguration'])->where('churchName', '[A-Za-z0-9\\s\\-_]+')->name('certificate-config.save');
+    Route::delete('/certificate-config/{churchName}/{certificateType}', [CertificateConfigurationController::class, 'deleteConfiguration'])->where('churchName', '[A-Za-z0-9\\s\\-_]+')->name('certificate-config.delete');
     
     // Get certificate field data auto-populated from appointment answers
     Route::get('/appointments/{appointmentId}/certificate-data/{certificateType}', [CertificateConfigurationController::class, 'getCertificateFieldData'])->where('appointmentId', '[0-9]+')->name('appointments.certificate-data');
+
+    // Resolve which certificate type is configured for this appointment's service
+    Route::get('/appointments/{appointmentId}/certificate-type', [CertificateConfigurationController::class, 'getCertificateTypeForAppointment'])->where('appointmentId', '[0-9]+')->name('appointments.certificate-type');
     
     // Certificate verification
     Route::post('/certificate-verification', [CertificateConfigurationController::class, 'createCertificateVerification'])->name('certificate.verification.create');

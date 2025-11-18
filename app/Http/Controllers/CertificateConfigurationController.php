@@ -32,25 +32,71 @@ class CertificateConfigurationController extends Controller
                 ], 404);
             }
 
+            // Current configuration for this certificate type
             $config = CertificateConfiguration::where('ChurchID', $church->ChurchID)
                                             ->where('CertificateType', $certificateType)
                                             ->with('service')
                                             ->first();
 
+            // All service IDs that are already mapped to any certificate for this church
+            $usedServiceIds = CertificateConfiguration::where('ChurchID', $church->ChurchID)
+                ->whereNotNull('ServiceID')
+                ->pluck('ServiceID')
+                ->unique()
+                ->values();
+
             if (!$config) {
                 return response()->json([
                     'message' => 'No configuration found for this certificate type.',
-                    'config' => null
+                    'config' => null,
+                    'used_service_ids' => $usedServiceIds,
                 ], 200);
             }
 
             return response()->json([
-                'config' => $config
+                'config' => $config,
+                'used_service_ids' => $usedServiceIds,
             ]);
 
         } catch (\Exception $e) {
             return response()->json([
                 'error' => 'An error occurred while fetching certificate configuration.',
+                'details' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Delete certificate configuration for a church & certificate type
+     */
+    public function deleteConfiguration(string $churchName, string $certificateType): JsonResponse
+    {
+        try {
+            // Find the church by name
+            $churchName = preg_replace('/:\d+$/', '', $churchName);
+            $name = str_replace('-', ' ', ucwords($churchName, '-'));
+            $church = Church::whereRaw('LOWER(ChurchName) = ?', [strtolower($name)])
+                           ->where('ChurchStatus', Church::STATUS_ACTIVE)
+                           ->first();
+
+            if (!$church) {
+                return response()->json([
+                    'error' => 'Church not found or is not active.'
+                ], 404);
+            }
+
+            $deleted = CertificateConfiguration::where('ChurchID', $church->ChurchID)
+                ->where('CertificateType', $certificateType)
+                ->delete();
+
+            return response()->json([
+                'success' => true,
+                'deleted' => $deleted,
+                'message' => 'Certificate configuration has been reset and removed.',
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'error' => 'An error occurred while deleting certificate configuration.',
                 'details' => $e->getMessage()
             ], 500);
         }
@@ -196,6 +242,51 @@ class CertificateConfigurationController extends Controller
         } catch (\Exception $e) {
             return response()->json([
                 'error' => 'An error occurred while fetching certificate field data.',
+                'details' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Resolve which certificate type should be used for a given appointment
+     * based on the certificate_configurations table (ChurchID + ServiceID mapping).
+     */
+    public function getCertificateTypeForAppointment(int $appointmentId): JsonResponse
+    {
+        try {
+            // Get appointment with its church and service
+            $appointment = DB::table('Appointment')
+                ->where('AppointmentID', $appointmentId)
+                ->select('AppointmentID', 'ChurchID', 'ServiceID')
+                ->first();
+
+            if (!$appointment) {
+                return response()->json([
+                    'error' => 'Appointment not found.'
+                ], 404);
+            }
+
+            // Find certificate configuration linked to this service
+            $config = CertificateConfiguration::where('ChurchID', $appointment->ChurchID)
+                ->where('ServiceID', $appointment->ServiceID)
+                ->where('IsEnabled', true)
+                ->first();
+
+            if (!$config) {
+                return response()->json([
+                    'error' => 'No enabled certificate configuration found for this service.',
+                    'certificate_type' => null
+                ], 404);
+            }
+
+            return response()->json([
+                'success' => true,
+                'certificate_type' => $config->CertificateType,
+                'config' => $config,
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'error' => 'An error occurred while resolving certificate type for appointment.',
                 'details' => $e->getMessage()
             ], 500);
         }
