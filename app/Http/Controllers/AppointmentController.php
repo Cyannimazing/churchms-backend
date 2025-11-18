@@ -1462,6 +1462,28 @@ class AppointmentController extends Controller
                 ], 422);
             }
 
+            // Enforce dynamic minimum advance notice (e.g. 3 weeks before service)
+            $serviceConfig = SacramentService::find($appointment->ServiceID);
+            if ($serviceConfig && $serviceConfig->advanceBookingNumber && $serviceConfig->advanceBookingUnit) {
+                $minAdvanceDate = Carbon::now();
+
+                if ($serviceConfig->advanceBookingUnit === 'weeks') {
+                    $minAdvanceDate = $minAdvanceDate->copy()->addWeeks($serviceConfig->advanceBookingNumber);
+                } elseif ($serviceConfig->advanceBookingUnit === 'months') {
+                    $minAdvanceDate = $minAdvanceDate->copy()->addMonths($serviceConfig->advanceBookingNumber);
+                }
+
+                if ($newAppointmentDateTime->lessThan($minAdvanceDate)) {
+                    return response()->json([
+                        'error' => sprintf(
+                            'This service requires at least %d %s advance notice for appointments.',
+                            $serviceConfig->advanceBookingNumber,
+                            $serviceConfig->advanceBookingUnit
+                        ),
+                    ], 422);
+                }
+            }
+
             // Ensure date slot exists and check availability for the NEW slot
             $this->ensureDateSlotExists($request->schedule_time_id, $newDate, $slotCapacity);
 
@@ -1529,6 +1551,8 @@ class AppointmentController extends Controller
                     $appointment->Status = 'Pending';
                     $appointment->reschedule_count = $currentRescheduleCount + 1;
                     $appointment->last_rescheduled_at = now();
+                    // Also bump created_at so user-facing timestamp reflects the latest reschedule
+                    $appointment->created_at = now();
                     $appointment->updated_at = now();
                     $appointment->save();
 
@@ -3235,6 +3259,23 @@ class AppointmentController extends Controller
                     throw new \Exception('New schedule not found.');
                 }
 
+                // Enforce dynamic minimum advance notice at payment time as well
+                $serviceConfig = SacramentService::find($appointment->ServiceID);
+                if ($serviceConfig && $serviceConfig->advanceBookingNumber && $serviceConfig->advanceBookingUnit) {
+                    $minAdvanceDate = Carbon::now();
+
+                    if ($serviceConfig->advanceBookingUnit === 'weeks') {
+                        $minAdvanceDate = $minAdvanceDate->copy()->addWeeks($serviceConfig->advanceBookingNumber);
+                    } elseif ($serviceConfig->advanceBookingUnit === 'months') {
+                        $minAdvanceDate = $minAdvanceDate->copy()->addMonths($serviceConfig->advanceBookingNumber);
+                    }
+
+                    $newDateTimeCarbon = Carbon::parse($newAppointmentDateTime);
+                    if ($newDateTimeCarbon->lessThan($minAdvanceDate)) {
+                        throw new \Exception('Appointment can no longer be rescheduled this close to the service date due to minimum advance notice.');
+                    }
+                }
+
                 $oldAppointmentDateTime = $appointment->AppointmentDate;
                 $newDateOnly = Carbon::parse($newAppointmentDateTime)->format('Y-m-d');
 
@@ -3268,6 +3309,8 @@ class AppointmentController extends Controller
                 $appointment->Status = 'Pending';
                 $appointment->reschedule_count = $currentRescheduleCount + 1;
                 $appointment->last_rescheduled_at = now();
+                // Also bump created_at so user-facing timestamp reflects the latest reschedule
+                $appointment->created_at = now();
                 $appointment->updated_at = now();
                 $appointment->save();
 
