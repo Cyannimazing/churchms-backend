@@ -246,6 +246,9 @@ Route::middleware('auth:sanctum')->group(function () {
     // Get specific appointment details
     Route::get('/appointments/{appointmentId}', [AppointmentController::class, 'show'])->where('appointmentId', '[0-9]+')->name('appointments.show');
     
+    // Reschedule an appointment (user-initiated)
+    Route::post('/appointments/{appointmentId}/reschedule', [AppointmentController::class, 'reschedule'])->where('appointmentId', '[0-9]+')->name('appointments.reschedule');
+    
     // Get church appointments (for church staff)
     Route::get('/church-appointments/{churchName}', [AppointmentController::class, 'getChurchAppointments'])->where('churchName', '[A-Za-z0-9\s\-_]+')->name('church.appointments.index');
     
@@ -276,6 +279,10 @@ Route::middleware('auth:sanctum')->group(function () {
     // Payment success handling (for completing paid appointments)
     Route::post('/appointments/payment/success', [AppointmentController::class, 'handlePaymentSuccess'])->name('appointments.payment.success');
     
+    // Reschedule fee payment callbacks
+    Route::get('/appointment-reschedule/payment/success', [AppointmentController::class, 'handleReschedulePaymentSuccess'])->name('appointments.reschedule.payment.success');
+    Route::get('/appointment-reschedule/payment/cancel', [AppointmentController::class, 'handleReschedulePaymentCancel'])->name('appointments.reschedule.payment.cancel');
+    
     // Appointment transaction details and receipts
     Route::get('/appointment-transactions/{transactionId}', [AppointmentController::class, 'getAppointmentTransactionDetails'])->name('appointment.transactions.details');
     Route::get('/appointment-transactions/by-session', [AppointmentController::class, 'getAppointmentTransactionBySession'])->name('appointment.transactions.by_session');
@@ -286,9 +293,13 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('/church-transactions/{transactionId}/refund', [AppointmentController::class, 'markTransactionAsRefunded'])->where('transactionId', '[0-9]+')->name('church.transactions.refund');
     
     // Convenience fee management
-    Route::get('/convenience-fees/{churchName}', [ConvenienceFeeController::class, 'getChurchConvenienceFee'])->where('churchName', '[A-Za-z0-9\s\-_]+')->name('convenience-fees.show');
-    Route::post('/convenience-fees/{churchName}', [ConvenienceFeeController::class, 'storeOrUpdate'])->where('churchName', '[A-Za-z0-9\s\-_]+')->name('convenience-fees.store');
+    Route::get('/convenience-fees/{churchName}', [ConvenienceFeeController::class, 'getChurchConvenienceFee'])->where('churchName', '[A-Za-z0-9\\s\\-_]+')->name('convenience-fees.show');
+    Route::post('/convenience-fees/{churchName}', [ConvenienceFeeController::class, 'storeOrUpdate'])->where('churchName', '[A-Za-z0-9\\s\\-_]+')->name('convenience-fees.store');
     Route::post('/convenience-fees/calculate-refund', [ConvenienceFeeController::class, 'calculateRefund'])->name('convenience-fees.calculate-refund');
+
+    // Reschedule fee management
+    Route::get('/reschedule-fees/{churchName}', [\App\Http\Controllers\RescheduleFeeController::class, 'getChurchRescheduleFee'])->where('churchName', '[A-Za-z0-9\\s\\-_]+')->name('reschedule-fees.show');
+    Route::post('/reschedule-fees/{churchName}', [\App\Http\Controllers\RescheduleFeeController::class, 'storeOrUpdate'])->where('churchName', '[A-Za-z0-9\\s\\-_]+')->name('reschedule-fees.store');
 });
 
 // Church Members Management

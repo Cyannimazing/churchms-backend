@@ -16,6 +16,8 @@ use App\Models\SacramentService;
 use App\Models\PaymentSession;
 use App\Models\ChurchTransaction;
 use App\Models\ChurchConvenienceFee;
+use App\Models\ChurchRescheduleFee;
+use App\Models\ScheduleFee;
 use App\Models\Notification;
 use App\Services\PayMongoService;
 use App\Events\AppointmentCreated;
@@ -1361,6 +1363,319 @@ class AppointmentController extends Controller
             return response()->json([
                 'error' => 'An error occurred while fetching church appointments.',
                 'details' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Allow user to reschedule an appointment.
+     *
+     * Rules:
+     * - Can only reschedule until 3 days (72 hours) before the current appointment date.
+     * - First reschedule is free.
+     * - Second and subsequent reschedules require a fee based on the church convenience fee.
+     * - Previously submitted requirements remain linked to the appointment.
+     */
+    public function reschedule(Request $request, int $appointmentId): JsonResponse
+    {
+        try {
+            $validator = Validator::make($request->all(), [
+                'schedule_id' => 'required|integer|exists:service_schedules,ScheduleID',
+                'schedule_time_id' => 'required|integer|exists:schedule_times,ScheduleTimeID',
+                'selected_date' => 'required|date|after_or_equal:today',
+            ]);
+
+            if ($validator->fails()) {
+                return response()->json([
+                    'error' => 'Validation failed.',
+                    'errors' => $validator->errors(),
+                ], 422);
+            }
+
+            $user = $request->user();
+            if (!$user) {
+                return response()->json(['error' => 'Authentication required.'], 401);
+            }
+
+            /** @var Appointment|null $appointment */
+            $appointment = Appointment::find($appointmentId);
+            if (!$appointment) {
+                return response()->json(['error' => 'Appointment not found.'], 404);
+            }
+
+            // Ensure the logged-in user owns this appointment
+            if ($appointment->UserID !== $user->id) {
+                return response()->json(['error' => 'You are not allowed to reschedule this appointment.'], 403);
+            }
+
+            // Disallow rescheduling for cancelled / completed / rejected appointments
+            if (in_array($appointment->Status, ['Cancelled', 'Completed', 'Rejected'], true)) {
+                return response()->json([
+                    'error' => 'This appointment can no longer be rescheduled.',
+                ], 422);
+            }
+
+            // Enforce 3-day (72 hour) cutoff before the CURRENT appointment date
+            $now = Carbon::now();
+            $currentAppointmentDate = Carbon::parse($appointment->AppointmentDate);
+            if ($now->greaterThanOrEqualTo($currentAppointmentDate->copy()->subDays(3))) {
+                return response()->json([
+                    'error' => 'You can only reschedule up to 3 days before the appointment date.',
+                ], 422);
+            }
+
+            // Validate that the new schedule belongs to the same service
+            $schedule = ServiceSchedule::where('ScheduleID', $request->schedule_id)
+                ->where('ServiceID', $appointment->ServiceID)
+                ->first();
+
+            if (!$schedule) {
+                return response()->json([
+                    'error' => 'Schedule not found for this service.',
+                ], 404);
+            }
+
+            // Validate schedule time
+            $scheduleTime = DB::table('schedule_times')
+                ->where('ScheduleTimeID', $request->schedule_time_id)
+                ->where('ScheduleID', $request->schedule_id)
+                ->first();
+
+            if (!$scheduleTime) {
+                return response()->json([
+                    'error' => 'Schedule time not found for this schedule.',
+                ], 404);
+            }
+
+            $newDate = $request->selected_date;
+            $slotCapacity = $schedule->SlotCapacity;
+
+            // Prevent rescheduling to exactly the same date and time as the
+            // current appointment. We compare the normalized datetime that will
+            // be stored for the new appointment against the existing one.
+            $newAppointmentDateTime = Carbon::parse($newDate)
+                ->setTimeFromTimeString($scheduleTime->StartTime);
+
+            if ($newAppointmentDateTime->equalTo(Carbon::parse($appointment->AppointmentDate))) {
+                return response()->json([
+                    'error' => 'Please choose a different date or time from your current appointment.',
+                ], 422);
+            }
+
+            // Ensure date slot exists and check availability for the NEW slot
+            $this->ensureDateSlotExists($request->schedule_time_id, $newDate, $slotCapacity);
+
+            $newSlot = DB::table('schedule_time_date_slots')
+                ->where('ScheduleTimeID', $request->schedule_time_id)
+                ->where('SlotDate', $newDate)
+                ->first();
+
+            if (!$newSlot || $newSlot->RemainingSlots <= 0) {
+                return response()->json([
+                    'error' => 'No slots available for the selected new date and time.',
+                ], 409);
+            }
+
+            $currentRescheduleCount = (int) ($appointment->reschedule_count ?? 0);
+            $requiresPayment = $currentRescheduleCount >= 1; // First reschedule is free
+            $feeAmount = 0.0;
+
+            if ($requiresPayment) {
+                // Get active reschedule fee for this church
+                $rescheduleFee = ChurchRescheduleFee::getActiveForChurch((int) $appointment->ChurchID);
+
+                if ($rescheduleFee && $rescheduleFee->is_active) {
+                    // Use latest appointment payment as base amount (if any)
+                    $baseAmount = (float) ChurchTransaction::where('appointment_id', $appointment->AppointmentID)
+                        ->where('transaction_type', 'appointment_payment')
+                        ->orderBy('transaction_date', 'desc')
+                        ->value('amount_paid');
+
+                    // For fixed fee type, baseAmount is ignored inside calculateFee()
+                    $feeAmount = (float) $rescheduleFee->calculateFee($baseAmount);
+                }
+
+                if ($feeAmount <= 0) {
+                    // No actual fee to charge, treat as free
+                    $requiresPayment = false;
+                }
+            }
+
+            // If no payment is required, perform the reschedule immediately
+            if (!$requiresPayment) {
+                $oldAppointmentDateTime = $appointment->AppointmentDate;
+                $newAppointmentDateTime = Carbon::parse($newDate)
+                    ->setTimeFromTimeString($scheduleTime->StartTime)
+                    ->format('Y-m-d H:i:s');
+
+                DB::beginTransaction();
+
+                try {
+                    // Release the old slot
+                    $oldSchedule = ServiceSchedule::find($appointment->ScheduleID);
+                    if ($oldSchedule) {
+                        $oldDateOnly = Carbon::parse($appointment->AppointmentDate)->format('Y-m-d');
+                        $this->ensureDateSlotExists($appointment->ScheduleTimeID, $oldDateOnly, $oldSchedule->SlotCapacity);
+                        $this->adjustRemainingSlots($appointment->ScheduleTimeID, $oldDateOnly, 1, $oldSchedule->SlotCapacity);
+                    }
+
+                    // Reserve the new slot
+                    $this->adjustRemainingSlots($request->schedule_time_id, $newDate, -1, $slotCapacity);
+
+                    // Update appointment fields
+                    $appointment->ScheduleID = $request->schedule_id;
+                    $appointment->ScheduleTimeID = $request->schedule_time_id;
+                    $appointment->AppointmentDate = $newAppointmentDateTime;
+                    $appointment->Status = 'Pending';
+                    $appointment->reschedule_count = $currentRescheduleCount + 1;
+                    $appointment->last_rescheduled_at = now();
+                    $appointment->updated_at = now();
+                    $appointment->save();
+
+                    // Notify both the user and the church about the reschedule
+                    $this->sendRescheduleNotifications($appointment, $oldAppointmentDateTime, $newAppointmentDateTime);
+
+                    DB::commit();
+
+                    return response()->json([
+                        'success' => true,
+                        'message' => 'Your appointment has been rescheduled successfully.',
+                        'appointment' => [
+                            'id' => $appointment->AppointmentID,
+                            'appointment_date' => $appointment->AppointmentDate,
+                            'status' => $appointment->Status,
+                            'reschedule_count' => $appointment->reschedule_count,
+                        ],
+                    ]);
+                } catch (\Exception $e) {
+                    DB::rollBack();
+                    throw $e;
+                }
+            }
+
+            // Payment is required for this reschedule
+            $paymongoService = new PayMongoService($appointment->ChurchID);
+            if (!$paymongoService->isConfigured()) {
+                return response()->json([
+                    'error' => 'Payment system is not configured for this church.',
+                ], 503);
+            }
+
+            $church = Church::find($appointment->ChurchID);
+            $service = SacramentService::find($appointment->ServiceID);
+
+            if (!$church || !$service) {
+                return response()->json([
+                    'error' => 'Related church or service not found for this appointment.',
+                ], 500);
+            }
+
+            $newAppointmentDateTime = Carbon::parse($newDate)
+                ->setTimeFromTimeString($scheduleTime->StartTime)
+                ->format('Y-m-d H:i:s');
+
+            // Generate unique reference number for this reschedule payment
+            $receiptCode = 'RS-' . strtoupper(substr(uniqid(), -8));
+
+            $metadata = [
+                'type' => 'appointment_reschedule_fee',
+                'appointment_id' => $appointment->AppointmentID,
+                'church_id' => $appointment->ChurchID,
+                'service_id' => $appointment->ServiceID,
+                'old_schedule_id' => $appointment->ScheduleID,
+                'old_schedule_time_id' => $appointment->ScheduleTimeID,
+                'old_appointment_date' => $appointment->AppointmentDate,
+                'new_schedule_id' => $request->schedule_id,
+                'new_schedule_time_id' => $request->schedule_time_id,
+                'new_appointment_date' => $newAppointmentDateTime,
+                'reschedule_count' => $currentRescheduleCount + 1,
+                'receipt_code' => $receiptCode,
+            ];
+
+            $description = sprintf(
+                '[Ref: %s] Reschedule fee for %s - %s (New Date: %s, Time: %s)',
+                $receiptCode,
+                $church->ChurchName,
+                $service->ServiceName,
+                $newDate,
+                $scheduleTime->StartTime
+            );
+
+            // Include church_id so the success handler can reliably load the
+            // correct PayMongo configuration for this church, independent of
+            // any local transaction records.
+            $successUrl = url('/appointment-reschedule/payment/success?session_id={CHECKOUT_SESSION_ID}&appointment_id=' . $appointment->AppointmentID . '&church_id=' . $appointment->ChurchID);
+            $cancelUrl = url('/appointment-reschedule/payment/cancel?session_id={CHECKOUT_SESSION_ID}&appointment_id=' . $appointment->AppointmentID . '&church_id=' . $appointment->ChurchID);
+
+            $checkoutResult = $paymongoService->createMultiPaymentCheckout(
+                $feeAmount,
+                $description,
+                $successUrl,
+                $cancelUrl,
+                $metadata
+            );
+
+            if (!$checkoutResult['success']) {
+                Log::error('Failed to create PayMongo checkout session for reschedule fee', [
+                    'appointment_id' => $appointment->AppointmentID,
+                    'error' => $checkoutResult['error'] ?? 'Unknown error',
+                    'details' => $checkoutResult['details'] ?? null,
+                ]);
+
+                return response()->json([
+                    'error' => 'Failed to create payment session for reschedule fee. Please try again later.',
+                    'details' => $checkoutResult['error'] ?? null,
+                ], 500);
+            }
+
+            $checkoutData = $checkoutResult['data'];
+            $checkoutUrl = $checkoutData['attributes']['checkout_url'] ?? null;
+            $expiresAtRaw = $checkoutData['attributes']['expires_at'] ?? null;
+            $expiresAt = $expiresAtRaw ? Carbon::createFromTimestamp($expiresAtRaw) : now()->addMinutes(30);
+
+            // Store church transaction for this reschedule fee
+            try {
+                ChurchTransaction::create([
+                    'user_id' => $user->id,
+                    'church_id' => $appointment->ChurchID,
+                    'service_id' => $appointment->ServiceID,
+                    'schedule_id' => $request->schedule_id,
+                    'schedule_time_id' => $request->schedule_time_id,
+                    'appointment_id' => $appointment->AppointmentID,
+                    'paymongo_session_id' => $checkoutData['id'],
+                    'receipt_code' => $receiptCode,
+                    'payment_method' => 'multi',
+                    'amount_paid' => $feeAmount,
+                    'currency' => 'PHP',
+                    'transaction_type' => 'appointment_reschedule_fee',
+                    'status' => 'pending',
+                    'checkout_url' => $checkoutUrl,
+                    'appointment_date' => $newAppointmentDateTime,
+                    'transaction_date' => now(),
+                    'notes' => 'Pending reschedule fee payment',
+                    'metadata' => $metadata,
+                    'expires_at' => $expiresAt,
+                ]);
+            } catch (\Exception $e) {
+                Log::warning('Failed to persist reschedule fee transaction', [
+                    'error' => $e->getMessage(),
+                ]);
+            }
+
+            return response()->json([
+                'success' => false,
+                'requires_payment' => true,
+                'redirect_url' => $checkoutUrl,
+                'message' => 'A reschedule fee is required. Please complete the payment to confirm your new schedule.',
+                'fee' => [
+                    'amount' => $feeAmount,
+                    'currency' => 'PHP',
+                ],
+            ], 402);
+        } catch (\Exception $e) {
+            return response()->json([
+                'error' => 'An error occurred while trying to reschedule your appointment.',
+                'details' => $e->getMessage(),
             ], 500);
         }
     }
@@ -2738,6 +3053,284 @@ class AppointmentController extends Controller
     }
 
     /**
+     * Handle successful reschedule fee payment
+     */
+    public function handleReschedulePaymentSuccess(Request $request)
+    {
+        $sessionId = $request->query('session_id');
+        $appointmentId = (int) $request->query('appointment_id');
+        $churchId = (int) $request->query('church_id');
+
+        if (!$sessionId || !$appointmentId || !$churchId) {
+            return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/dashboard?error=missing_reschedule_params');
+        }
+
+        try {
+            Log::info('Reschedule payment success callback received', [
+                'session_id'     => $sessionId,
+                'appointment_id' => $appointmentId,
+                'church_id'      => $churchId,
+                'full_url'       => $request->fullUrl(),
+            ]);
+
+            // If PayMongo sends the literal template placeholder "{CHECKOUT_SESSION_ID}"
+            // (known behavior for some integrations), resolve the real session ID from
+            // our own ChurchTransaction record created in the reschedule() method.
+            $originalSessionId = $sessionId;
+            $transaction = null;
+
+            if ($sessionId === '{CHECKOUT_SESSION_ID}') {
+                $transaction = ChurchTransaction::where('transaction_type', 'appointment_reschedule_fee')
+                    ->where('appointment_id', $appointmentId)
+                    ->where('church_id', $churchId)
+                    ->orderBy('created_at', 'desc')
+                    ->first();
+
+                if (!$transaction || !$transaction->paymongo_session_id) {
+                    Log::warning('Unable to resolve actual PayMongo session for reschedule placeholder', [
+                        'appointment_id' => $appointmentId,
+                        'church_id'      => $churchId,
+                        'original_session_id' => $originalSessionId,
+                    ]);
+                    return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/dashboard?error=reschedule_payment_verification_failed');
+                }
+
+                $sessionId = $transaction->paymongo_session_id;
+
+                Log::info('Resolved real PayMongo session for reschedule', [
+                    'appointment_id'     => $appointmentId,
+                    'church_id'          => $churchId,
+                    'original_session_id'=> $originalSessionId,
+                    'resolved_session_id'=> $sessionId,
+                ]);
+            } else {
+                // Normal case: try to load any existing transaction for later update.
+                $transaction = ChurchTransaction::where('transaction_type', 'appointment_reschedule_fee')
+                    ->where('paymongo_session_id', $sessionId)
+                    ->first();
+            }
+
+            // Verify payment directly with PayMongo using the same church-specific
+            // payment configuration used for normal sacrament payments.
+            $paymongoService = new PayMongoService($churchId);
+            $result = $paymongoService->getCheckoutSession($sessionId);
+
+            if (!$result['success']) {
+                Log::warning('Failed to verify reschedule fee payment with PayMongo', [
+                    'session_id' => $sessionId,
+                    'church_id'  => $churchId,
+                    'result'     => $result,
+                ]);
+                return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/dashboard?error=reschedule_payment_verification_failed');
+            }
+
+            $sessionData = $result['data'];
+            $attributes = $sessionData['attributes'] ?? [];
+            $metadata   = $attributes['metadata'] ?? [];
+
+            // --- Determine if this checkout is actually paid ---
+            $paymentStatus = $attributes['payment_status'] ?? null;
+            $genericStatus = $attributes['status'] ?? null;
+            $payments      = $attributes['payments'] ?? [];
+
+            $isPaid = ($paymentStatus === 'paid') || ($genericStatus === 'paid');
+            if (!$isPaid && is_array($payments)) {
+                foreach ($payments as $p) {
+                    if (($p['attributes']['status'] ?? null) === 'paid') {
+                        $isPaid = true;
+                        break;
+                    }
+                }
+            }
+
+            Log::info('Reschedule PayMongo session attributes', [
+                'session_id'     => $sessionId,
+                'payment_status' => $paymentStatus,
+                'status'         => $genericStatus,
+                'is_paid'        => $isPaid,
+                'attributes'     => $attributes,
+            ]);
+
+            // Basic sanity check: metadata should match the appointment being rescheduled.
+            if (($metadata['appointment_id'] ?? null) != $appointmentId) {
+                Log::warning('Reschedule payment metadata appointment_id mismatch', [
+                    'expected_appointment_id' => $appointmentId,
+                    'metadata_appointment_id' => $metadata['appointment_id'] ?? null,
+                ]);
+                return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/dashboard?error=reschedule_payment_verification_failed');
+            }
+
+            if (($metadata['type'] ?? null) !== 'appointment_reschedule_fee') {
+                // Not a reschedule fee session; fallback to normal success page
+                return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/dashboard?info=payment_completed');
+            }
+
+            if (!$isPaid) {
+                if ($transaction) {
+                    $transaction->update([
+                        'status' => $paymentStatus ?: ($genericStatus ?: 'failed'),
+                    ]);
+                }
+                return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/dashboard?error=reschedule_payment_not_paid');
+            }
+
+            DB::beginTransaction();
+
+            try {
+                // Update / create transaction record
+                $paymentMethod = $this->getActualPaymentMethod($attributes);
+                $amountPaid = isset($attributes['amount']) ? $attributes['amount'] / 100 : ($transaction->amount_paid ?? 0);
+
+                if ($transaction) {
+                    $transaction->update([
+                        'status' => 'paid',
+                        'payment_method' => $paymentMethod,
+                        'amount_paid' => $amountPaid > 0 ? $amountPaid : $transaction->amount_paid,
+                        'transaction_date' => now(),
+                        'notes' => 'Reschedule fee payment completed via PayMongo',
+                    ]);
+                } else {
+                    $transaction = ChurchTransaction::create([
+                        'user_id' => auth()->id(),
+                        'church_id' => $metadata['church_id'] ?? 0,
+                        'service_id' => $metadata['service_id'] ?? null,
+                        'appointment_id' => $appointmentId,
+                        'paymongo_session_id' => $sessionId,
+                        'receipt_code' => $metadata['receipt_code'] ?? null,
+                        'payment_method' => $paymentMethod,
+                        'amount_paid' => $amountPaid,
+                        'currency' => 'PHP',
+                        'transaction_type' => 'appointment_reschedule_fee',
+                        'status' => 'paid',
+                        'transaction_date' => now(),
+                        'notes' => 'Reschedule fee payment completed via PayMongo',
+                        'metadata' => $metadata,
+                    ]);
+                }
+
+                // Apply the actual reschedule using metadata
+                /** @var Appointment|null $appointment */
+                $appointment = Appointment::find($appointmentId);
+                if (!$appointment) {
+                    throw new \Exception('Appointment not found for reschedule.');
+                }
+
+                // Enforce the 3-day rule again at payment time
+                $now = Carbon::now();
+                $currentAppointmentDate = Carbon::parse($appointment->AppointmentDate);
+                if ($now->greaterThanOrEqualTo($currentAppointmentDate->copy()->subDays(3))) {
+                    throw new \Exception('Appointment can no longer be rescheduled.');
+                }
+
+                $newScheduleId = $metadata['new_schedule_id'] ?? null;
+                $newScheduleTimeId = $metadata['new_schedule_time_id'] ?? null;
+                $newAppointmentDateTime = $metadata['new_appointment_date'] ?? null;
+
+                if (!$newScheduleId || !$newScheduleTimeId || !$newAppointmentDateTime) {
+                    throw new \Exception('Missing new schedule information in payment metadata.');
+                }
+
+                $newSchedule = ServiceSchedule::find($newScheduleId);
+                if (!$newSchedule) {
+                    throw new \Exception('New schedule not found.');
+                }
+
+                $oldAppointmentDateTime = $appointment->AppointmentDate;
+                $newDateOnly = Carbon::parse($newAppointmentDateTime)->format('Y-m-d');
+
+                // Ensure new slot still has availability
+                $this->ensureDateSlotExists($newScheduleTimeId, $newDateOnly, $newSchedule->SlotCapacity);
+                $currentSlot = DB::table('schedule_time_date_slots')
+                    ->where('ScheduleTimeID', $newScheduleTimeId)
+                    ->where('SlotDate', $newDateOnly)
+                    ->first();
+
+                if (!$currentSlot || $currentSlot->RemainingSlots <= 0) {
+                    throw new \Exception('No slots available for the selected new schedule.');
+                }
+
+                // Release old slot
+                $oldSchedule = ServiceSchedule::find($appointment->ScheduleID);
+                if ($oldSchedule) {
+                    $oldDateOnly = Carbon::parse($appointment->AppointmentDate)->format('Y-m-d');
+                    $this->ensureDateSlotExists($appointment->ScheduleTimeID, $oldDateOnly, $oldSchedule->SlotCapacity);
+                    $this->adjustRemainingSlots($appointment->ScheduleTimeID, $oldDateOnly, 1, $oldSchedule->SlotCapacity);
+                }
+
+                // Reserve new slot
+                $this->adjustRemainingSlots($newScheduleTimeId, $newDateOnly, -1, $newSchedule->SlotCapacity);
+
+                // Update appointment
+                $currentRescheduleCount = (int) ($appointment->reschedule_count ?? 0);
+                $appointment->ScheduleID = $newScheduleId;
+                $appointment->ScheduleTimeID = $newScheduleTimeId;
+                $appointment->AppointmentDate = $newAppointmentDateTime;
+                $appointment->Status = 'Pending';
+                $appointment->reschedule_count = $currentRescheduleCount + 1;
+                $appointment->last_rescheduled_at = now();
+                $appointment->updated_at = now();
+                $appointment->save();
+
+                // Notify both the user and the church about the reschedule
+                $this->sendRescheduleNotifications($appointment, $oldAppointmentDateTime, $newAppointmentDateTime);
+
+                DB::commit();
+
+                // Redirect exactly like other payments: include transaction_id so the
+                // frontend can fetch details by ID just like subscriptions and
+                // normal appointment payments.
+                return redirect(
+                    env('FRONTEND_URL', 'http://localhost:3000') .
+                    '/payment/success?type=appointment_reschedule' .
+                    '&transaction_id=' . $transaction->ChurchTransactionID .
+                    '&appointment_id=' . $appointment->AppointmentID .
+                    '&session_id=' . $sessionId
+                );
+            } catch (\Exception $e) {
+                DB::rollBack();
+
+                Log::error('Error processing reschedule payment success', [
+                    'error' => $e->getMessage(),
+                    'session_id' => $sessionId,
+                    'appointment_id' => $appointmentId,
+                ]);
+
+                return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/dashboard?error=reschedule_processing_failed');
+            }
+        } catch (\Exception $e) {
+            Log::error('Unexpected error in reschedule payment success handler', [
+                'error' => $e->getMessage(),
+                'session_id' => $sessionId ?? null,
+                'appointment_id' => $appointmentId ?? null,
+            ]);
+
+            return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/dashboard?error=reschedule_payment_error');
+        }
+    }
+
+    /**
+     * Handle cancelled reschedule fee payment
+     */
+    public function handleReschedulePaymentCancel(Request $request)
+    {
+        try {
+            $sessionId = $request->query('session_id');
+
+            if ($sessionId) {
+                ChurchTransaction::where('paymongo_session_id', $sessionId)
+                    ->where('transaction_type', 'appointment_reschedule_fee')
+                    ->update(['status' => 'cancelled']);
+            }
+        } catch (\Exception $e) {
+            Log::warning('Error marking reschedule payment as cancelled', [
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/dashboard?info=reschedule_payment_cancelled');
+    }
+
+    /**
      * Process appointment creation from PayMongo session
      */
     private function processAppointmentFromSession($sessionId, $churchId, $sessionData)
@@ -3154,7 +3747,8 @@ class AppointmentController extends Controller
                 'schedule'
             ])
                 ->where('ChurchTransactionID', $transactionId)
-                ->where('transaction_type', 'appointment_payment')
+                // Support both normal appointment payments and reschedule fee payments
+                ->whereIn('transaction_type', ['appointment_payment', 'appointment_reschedule_fee'])
                 ->first();
 
             if (!$transaction) {
@@ -3283,13 +3877,33 @@ class AppointmentController extends Controller
         if (!$sessionId) {
             return response()->json(['success' => false, 'message' => 'Missing session_id'], 400);
         }
-        $transaction = ChurchTransaction::with(['church', 'user', 'appointment.service'])
-            ->where('paymongo_session_id', $sessionId)
-            ->where('transaction_type', 'appointment_payment')
+        
+        // Optionally filter by a specific appointment-related transaction type.
+        // If nothing is found with that type, fall back to any transaction for this
+        // PayMongo session so this endpoint can be reused for reschedule fees and
+        // regular appointment payments alike.
+        $transactionType = $request->query('transaction_type');
+
+        $baseQuery = ChurchTransaction::with(['church', 'user', 'appointment.service'])
+            ->where('paymongo_session_id', $sessionId);
+
+        $transaction = $baseQuery
+            ->when($transactionType, function ($query) use ($transactionType) {
+                $query->where('transaction_type', $transactionType);
+            })
             ->first();
+
+        if (!$transaction) {
+            // Fallback: ignore transaction_type and grab whatever exists for this session
+            $transaction = ChurchTransaction::with(['church', 'user', 'appointment.service'])
+                ->where('paymongo_session_id', $sessionId)
+                ->first();
+        }
+
         if (!$transaction) {
             return response()->json(['success' => false, 'message' => 'Transaction not found'], 404);
         }
+
         $isMass = false;
         if ($transaction->appointment && $transaction->appointment->service) {
             $isMass = $transaction->appointment->service->isMass ?? false;
@@ -3753,6 +4367,8 @@ class AppointmentController extends Controller
             }
             
             // Get transactions with related data (include refunded transactions for display)
+            // Include both normal appointment payments and reschedule fee payments so
+            // reschedules also show up in the church transaction record.
             $transactions = ChurchTransaction::with([
                 'user.profile',
                 'church',
@@ -3761,7 +4377,7 @@ class AppointmentController extends Controller
                 }
             ])
             ->where('church_id', $church->ChurchID)
-            ->where('transaction_type', 'appointment_payment')
+            ->whereIn('transaction_type', ['appointment_payment', 'appointment_reschedule_fee'])
             ->orderBy('transaction_date', 'desc')
             ->get();
             
@@ -4128,6 +4744,128 @@ class AppointmentController extends Controller
                 'error' => $e->getMessage(),
                 'appointment_id' => $appointmentId,
                 'new_status' => $newStatus
+            ]);
+        }
+    }
+    
+    /**
+     * Send notifications when an appointment is rescheduled
+     */
+    private function sendRescheduleNotifications(Appointment $appointment, $oldAppointmentDateTime, $newAppointmentDateTime): void
+    {
+        try {
+            $appointment->load(['user.profile', 'service', 'church']);
+
+            $user = $appointment->user;
+            $service = $appointment->service;
+            $church = $appointment->church;
+
+            if (!$user || !$service || !$church) {
+                return;
+            }
+
+            $userName = 'Unknown User';
+            if ($user->profile) {
+                $userName = trim(($user->profile->first_name ?? '') . ' ' . ($user->profile->last_name ?? ''));
+                if (empty($userName)) {
+                    $userName = $user->email;
+                }
+            } else {
+                $userName = $user->email;
+            }
+
+            $oldFormatted = Carbon::parse($oldAppointmentDateTime)->format('F j, Y g:i A');
+            $newFormatted = Carbon::parse($newAppointmentDateTime)->format('F j, Y g:i A');
+
+            // Notify the user
+            $userNotification = Notification::create([
+                'user_id' => $user->id,
+                'type' => 'appointment_rescheduled',
+                'title' => 'Appointment Rescheduled',
+                'message' => sprintf(
+                    'Your appointment for %s at %s has been rescheduled from %s to %s.',
+                    $service->ServiceName,
+                    $church->ChurchName,
+                    $oldFormatted,
+                    $newFormatted
+                ),
+                'data' => [
+                    'appointment_id' => $appointment->AppointmentID,
+                    'church_id' => $church->ChurchID,
+                    'service_id' => $service->ServiceID,
+                    'service_name' => $service->ServiceName,
+                    'appointment_date_old' => $oldAppointmentDateTime,
+                    'appointment_date_new' => $newAppointmentDateTime,
+                    'reschedule_count' => $appointment->reschedule_count,
+                ],
+            ]);
+            event(new NotificationCreated($user->id, $userNotification));
+
+            // Notify church owner
+            $ownerNotification = Notification::create([
+                'user_id' => $church->user_id,
+                'type' => 'appointment_rescheduled',
+                'title' => 'Appointment Rescheduled',
+                'message' => sprintf(
+                    '%s has rescheduled their appointment for %s from %s to %s.',
+                    $userName,
+                    $service->ServiceName,
+                    $oldFormatted,
+                    $newFormatted
+                ),
+                'data' => [
+                    'appointment_id' => $appointment->AppointmentID,
+                    'church_id' => $church->ChurchID,
+                    'service_id' => $service->ServiceID,
+                    'user_id' => $user->id,
+                    'user_name' => $userName,
+                    'service_name' => $service->ServiceName,
+                    'appointment_date_old' => $oldAppointmentDateTime,
+                    'appointment_date_new' => $newAppointmentDateTime,
+                    'reschedule_count' => $appointment->reschedule_count,
+                ],
+            ]);
+            event(new NotificationCreated($church->user_id, $ownerNotification));
+
+            // Notify church staff with appointment_list permission
+            $staffMembers = \App\Models\UserChurchRole::where('ChurchID', $church->ChurchID)
+                ->whereHas('role', function ($query) {
+                    $query->whereHas('permissions', function ($permQuery) {
+                        $permQuery->where('PermissionName', 'appointment_list');
+                    });
+                })
+                ->get();
+
+            foreach ($staffMembers as $staffRole) {
+                $staffNotification = Notification::create([
+                    'user_id' => $staffRole->user_id,
+                    'type' => 'appointment_rescheduled',
+                    'title' => 'Appointment Rescheduled',
+                    'message' => sprintf(
+                        '%s has rescheduled their appointment for %s from %s to %s.',
+                        $userName,
+                        $service->ServiceName,
+                        $oldFormatted,
+                        $newFormatted
+                    ),
+                    'data' => [
+                        'appointment_id' => $appointment->AppointmentID,
+                        'church_id' => $church->ChurchID,
+                        'service_id' => $service->ServiceID,
+                        'user_id' => $user->id,
+                        'user_name' => $userName,
+                        'service_name' => $service->ServiceName,
+                        'appointment_date_old' => $oldAppointmentDateTime,
+                        'appointment_date_new' => $newAppointmentDateTime,
+                        'reschedule_count' => $appointment->reschedule_count,
+                    ],
+                ]);
+                event(new NotificationCreated($staffRole->user_id, $staffNotification));
+            }
+        } catch (\Exception $e) {
+            Log::error('Failed to send reschedule notifications', [
+                'error' => $e->getMessage(),
+                'appointment_id' => $appointment->AppointmentID ?? null,
             ]);
         }
     }

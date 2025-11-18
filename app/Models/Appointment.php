@@ -25,11 +25,15 @@ class Appointment extends Model
         'cancellation_category',
         'cancellation_note',
         'cancelled_at',
+        'reschedule_count',
+        'last_rescheduled_at',
     ];
     
     protected $casts = [
         'AppointmentDate' => 'datetime',
         'cancelled_at' => 'datetime',
+        'reschedule_count' => 'integer',
+        'last_rescheduled_at' => 'datetime',
     ];
     
     public function user(): BelongsTo

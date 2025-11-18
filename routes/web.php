@@ -17,6 +17,12 @@ Route::get('/payment/cancel', [ChurchSubscriptionController::class, 'handlePayme
 Route::get('/appointment-payment/success', [AppointmentController::class, 'handleAppointmentPaymentSuccess'])->name('appointment.payment.success');
 Route::get('/appointment-payment/cancel', [AppointmentController::class, 'handleAppointmentPaymentCancel'])->name('appointment.payment.cancel');
 
+// Appointment RESCHEDULE payment callback routes (no auth required)
+// These URLs are used as success/cancel redirect URLs from PayMongo checkout.
+// Example: /appointment-reschedule/payment/success?session_id=...&appointment_id=123
+Route::get('/appointment-reschedule/payment/success', [AppointmentController::class, 'handleReschedulePaymentSuccess'])->name('web.appointment.reschedule.payment.success');
+Route::get('/appointment-reschedule/payment/cancel', [AppointmentController::class, 'handleReschedulePaymentCancel'])->name('web.appointment.reschedule.payment.cancel');
+
 // Broadcasting authentication route  
 Broadcast::routes(['middleware' => ['auth:sanctum']]);
 
